@@ -1,10 +1,8 @@
 """FastAPI application entrypoint and routes for AI Document Assistant."""
 
-from datetime import datetime, timezone
 import os
 from pathlib import Path
 from typing import Annotated
-import uuid
 
 from fastapi import FastAPI, File, HTTPException, UploadFile, status
 
@@ -20,9 +18,9 @@ MAX_FILE_SIZE_BYTES: int = int(
 )  # 10 MB limit
 ALLOWED_EXTENSIONS: set[str] = {".pdf", ".txt", ".docx"}
 
-# In-memory document storage (supports both DOCUMENTS_DB and documents_db naming)
-DOCUMENTS_DB: list[dict] = []
-documents_db = DOCUMENTS_DB
+# In-memory document storage: typed Pydantic models in UPPER_SNAKE_CASE
+DOCUMENTS_DB: list[DocumentResponse] = []
+documents_db = DOCUMENTS_DB  # Compatibility alias
 
 app = FastAPI(
     title="AI Document Assistant",
@@ -103,21 +101,16 @@ async def upload_document(
             ),
         )
 
-    # Assign universally unique identifier (UUID v4) and current UTC timestamp
-    doc_id = str(uuid.uuid4())
-    uploaded_at = datetime.now(timezone.utc)
+    # Instantiate validated Pydantic model (generates UUID and UTC timestamp via default_factory)
+    doc_record = DocumentResponse(
+        filename=filename,
+        size_bytes=size_bytes,
+    )
 
-    doc_record = {
-        "id": doc_id,
-        "filename": filename,
-        "size_bytes": size_bytes,
-        "uploaded_at": uploaded_at,
-    }
-
-    # Save to in-memory store
+    # Save typed model to in-memory store
     DOCUMENTS_DB.append(doc_record)
 
-    return DocumentResponse(**doc_record)
+    return doc_record
 
 
 @app.get(
@@ -130,4 +123,4 @@ async def upload_document(
 )
 async def list_documents() -> list[DocumentResponse]:
     """Return all stored document metadata records."""
-    return [DocumentResponse(**doc) for doc in DOCUMENTS_DB]
+    return DOCUMENTS_DB

@@ -1,6 +1,7 @@
 """Request and response schemas for the AI Document Assistant API."""
 
-from datetime import datetime
+from datetime import datetime, timezone
+from uuid import UUID, uuid4
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -39,13 +40,13 @@ class DocumentCreate(DocumentBase):
 class DocumentResponse(DocumentBase):
     """Response schema returned upon document upload or retrieval."""
 
-    id: str = Field(
-        ...,
+    id: UUID = Field(
+        default_factory=uuid4,
         description="Unique UUID identifier for the document",
         examples=["550e8400-e29b-41d4-a716-446655440000"],
     )
     uploaded_at: datetime = Field(
-        ...,
+        default_factory=lambda: datetime.now(timezone.utc),
         description="Timestamp in UTC recording when the document was received",
     )
 
