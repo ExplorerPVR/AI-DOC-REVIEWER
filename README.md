@@ -12,7 +12,8 @@ A clean, asynchronous FastAPI service for ingesting and cataloging documents (`.
   - Accepts single file uploads via `multipart/form-data`.
   - **Allowed Extensions**: `.pdf`, `.txt`, `.docx`.
   - **Maximum File Size**: 10 MB (10,485,760 bytes).
-  - **In-Memory Catalog**: Metadata stored in memory (`id`, `filename`, `size_bytes`, `uploaded_at`).
+  - **Streaming Chunk Validation**: Streams in 1 MB chunks to prevent memory exhaustion on oversized uploads.
+  - **In-Memory Catalog**: Metadata stored in memory (`id` as UUID, `filename`, `size_bytes`, `uploaded_at`).
   - **Strict Error Handling**:
     - `400 Bad Request`: Empty file payload.
     - `415 Unsupported Media Type`: Disallowed file extension.
@@ -121,7 +122,7 @@ curl -X GET "http://127.0.0.1:8000/health"
 ---
 
 ### 2. Upload Document
-Uploads a document (`.pdf`, `.txt`, `.docx`), validates its extension and byte size, and stores its metadata in memory.
+Uploads a document (`.pdf`, `.txt`, `.docx`), validates its extension and byte size, and stores its metadata in memory with a unique UUID.
 
 - **URL**: `POST /documents`
 - **Content-Type**: `multipart/form-data`
@@ -135,7 +136,7 @@ curl -X POST "http://127.0.0.1:8000/documents" \
 **Response (`201 Created`)**:
 ```json
 {
-  "id": 1,
+  "id": "550e8400-e29b-41d4-a716-446655440000",
   "filename": "sample.txt",
   "size_bytes": 38,
   "uploaded_at": "2026-10-28T13:00:00.123456Z"
@@ -178,7 +179,7 @@ curl -X GET "http://127.0.0.1:8000/documents"
 ```json
 [
   {
-    "id": 1,
+    "id": "550e8400-e29b-41d4-a716-446655440000",
     "filename": "sample.txt",
     "size_bytes": 38,
     "uploaded_at": "2026-10-28T13:00:00.123456Z"
@@ -198,11 +199,11 @@ uv run pytest -v
 
 ### Test Coverage Breakdown:
 1. `test_health_check`: Verifies `GET /health` returns `200 OK` and `{"status": "ok"}`.
-2. `test_upload_document_success`: Verifies valid `.txt` upload returns `201 Created` with expected fields (`id`, `filename`, `size_bytes`, `uploaded_at`).
+2. `test_upload_document_success`: Verifies valid `.txt` upload returns `201 Created` with expected fields and a valid UUID (`id`, `filename`, `size_bytes`, `uploaded_at`).
 3. `test_upload_document_empty_file`: Verifies 0-byte file upload returns `400 Bad Request` with an informative error message.
 4. `test_upload_document_wrong_file_type`: Verifies unsupported extensions (e.g., `.png`) return `415 Unsupported Media Type`.
 5. `test_upload_document_file_too_large`: Verifies files exceeding 10 MB return `413 Content Too Large`.
-6. `test_list_documents`: Verifies `GET /documents` initially returns `[]` and returns all uploaded document metadata sequentially after uploads.
+6. `test_list_documents`: Verifies `GET /documents` initially returns `[]` and returns all uploaded document metadata with unique UUIDs.
 7. `test_upload_docx_and_case_insensitive_extension`: Verifies uppercase extensions and Word `.docx` documents upload properly.
 
 ---
@@ -213,11 +214,11 @@ uv run pytest -v
 - `HealthResponse`: Schema guaranteeing `{ "status": "ok" }`.
 - `DocumentBase`: Defines core fields shared between models (`filename: str`, `size_bytes: int`).
 - `DocumentCreate`: Schema representing document creation payload attributes.
-- `DocumentResponse`: Inherits from `DocumentBase`, adding `id: int` and `uploaded_at: datetime` (formatted in ISO 8601).
+- `DocumentResponse`: Inherits from `DocumentBase`, using `default_factory=uuid4` for `id` and `default_factory=lambda: datetime.now(timezone.utc)` for `uploaded_at`.
 - `ErrorResponse`: Standardized schema for client error responses.
 
 ### Request Flow & Validation (`app/main.py`)
 1. **Extension Checking**: `Path(file.filename).suffix.lower()` ensures case-insensitive extension checking against `ALLOWED_EXTENSIONS = {".pdf", ".txt", ".docx"}` before reading file data. Returns `415` if invalid.
-2. **Size & Content Validation**: `await file.read()` reads file bytes. If `len(contents) == 0`, raises `400`. If `len(contents) > 10 * 1024 * 1024`, raises `413`.
-3. **In-Memory Store**: `documents_db: list[dict] = []` stores document metadata dictionaries. Each new entry receives `len(documents_db) + 1` and `datetime.now(timezone.utc)`.
+2. **Chunked Streaming & Size Validation**: Checks `file.size` upfront if populated, then streams file content in 1 MB chunks (`CHUNK_SIZE_BYTES = 1024 * 1024`). Rejects immediately with `413` if size exceeds 10 MB, preventing memory exhaustion on huge uploads.
+3. **In-Memory Store**: `DOCUMENTS_DB: list[DocumentResponse] = []` stores strongly-typed Pydantic instances.
 4. **Endpoint Modularity**: All 3 routes include OpenAPI summary, description, and status codes for interactive exploration in `/docs`.
