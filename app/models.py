@@ -39,10 +39,10 @@ class DocumentCreate(DocumentBase):
 class DocumentResponse(DocumentBase):
     """Response schema returned upon document upload or retrieval."""
 
-    id: int = Field(
+    id: str = Field(
         ...,
-        description="Unique sequential identifier for the document",
-        examples=[1],
+        description="Unique UUID identifier for the document",
+        examples=["550e8400-e29b-41d4-a716-446655440000"],
     )
     uploaded_at: datetime = Field(
         ...,

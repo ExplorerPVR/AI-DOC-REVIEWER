@@ -1,17 +1,18 @@
 """Unit and integration tests for FastAPI document assistant endpoints."""
 
+import uuid
 import pytest
 from fastapi.testclient import TestClient
 
-from app.main import app, documents_db
+from app.main import app, DOCUMENTS_DB
 
 
 @pytest.fixture(autouse=True)
 def reset_in_memory_db():
     """Ensure in-memory documents list is reset before and after every test."""
-    documents_db.clear()
+    DOCUMENTS_DB.clear()
     yield
-    documents_db.clear()
+    DOCUMENTS_DB.clear()
 
 
 @pytest.fixture
@@ -28,7 +29,7 @@ def test_health_check(client: TestClient):
 
 
 def test_upload_document_success(client: TestClient):
-    """Test 2: Successful upload returns status 201 with metadata."""
+    """Test 2: Successful upload returns status 201 with metadata and unique UUID."""
     file_content = b"This is a sample document for testing."
     files = {"file": ("sample.txt", file_content, "text/plain")}
 
@@ -36,7 +37,7 @@ def test_upload_document_success(client: TestClient):
     assert response.status_code == 201
 
     data = response.json()
-    assert data["id"] == 1
+    assert uuid.UUID(data["id"], version=4)
     assert data["filename"] == "sample.txt"
     assert data["size_bytes"] == len(file_content)
     assert "uploaded_at" in data
@@ -81,7 +82,7 @@ def test_upload_document_file_too_large(client: TestClient):
 
 
 def test_list_documents(client: TestClient):
-    """Test 6: Listing documents returns status 200 and previously uploaded documents."""
+    """Test 6: Listing documents returns status 200 and previously uploaded documents with unique IDs."""
     # Verify initially empty
     initial_res = client.get("/documents")
     assert initial_res.status_code == 200
@@ -102,10 +103,11 @@ def test_list_documents(client: TestClient):
 
     docs = list_res.json()
     assert len(docs) == 2
-    assert docs[0]["id"] == 1
+    assert docs[0]["id"] != docs[1]["id"]
+    assert uuid.UUID(docs[0]["id"], version=4)
+    assert uuid.UUID(docs[1]["id"], version=4)
     assert docs[0]["filename"] == "doc1.txt"
     assert docs[0]["size_bytes"] == len(b"First doc content")
-    assert docs[1]["id"] == 2
     assert docs[1]["filename"] == "doc2.pdf"
 
 
@@ -122,4 +124,4 @@ def test_upload_docx_and_case_insensitive_extension(client: TestClient):
     assert response.status_code == 201
     data = response.json()
     assert data["filename"] == "agreement.DOCX"
-    assert data["id"] == 1
+    assert uuid.UUID(data["id"], version=4)

@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 import os
 from pathlib import Path
 from typing import Annotated
+import uuid
 
 from fastapi import FastAPI, File, HTTPException, UploadFile, status
 
@@ -19,8 +20,9 @@ MAX_FILE_SIZE_BYTES: int = int(
 )  # 10 MB limit
 ALLOWED_EXTENSIONS: set[str] = {".pdf", ".txt", ".docx"}
 
-# In-memory document storage
-documents_db: list[dict] = []
+# In-memory document storage (supports both DOCUMENTS_DB and documents_db naming)
+DOCUMENTS_DB: list[dict] = []
+documents_db = DOCUMENTS_DB
 
 app = FastAPI(
     title="AI Document Assistant",
@@ -101,8 +103,8 @@ async def upload_document(
             ),
         )
 
-    # Assign sequential identifier and current UTC timestamp
-    doc_id = len(documents_db) + 1
+    # Assign universally unique identifier (UUID v4) and current UTC timestamp
+    doc_id = str(uuid.uuid4())
     uploaded_at = datetime.now(timezone.utc)
 
     doc_record = {
@@ -113,7 +115,7 @@ async def upload_document(
     }
 
     # Save to in-memory store
-    documents_db.append(doc_record)
+    DOCUMENTS_DB.append(doc_record)
 
     return DocumentResponse(**doc_record)
 
@@ -128,4 +130,4 @@ async def upload_document(
 )
 async def list_documents() -> list[DocumentResponse]:
     """Return all stored document metadata records."""
-    return [DocumentResponse(**doc) for doc in documents_db]
+    return [DocumentResponse(**doc) for doc in DOCUMENTS_DB]
