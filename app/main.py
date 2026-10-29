@@ -16,11 +16,11 @@ from app.models import (
 MAX_FILE_SIZE_BYTES: int = int(
     os.getenv("MAX_FILE_SIZE_BYTES", 10 * 1024 * 1024)
 )  # 10 MB limit
+CHUNK_SIZE_BYTES: int = 1024 * 1024  # 1 MB read chunk size
 ALLOWED_EXTENSIONS: set[str] = {".pdf", ".txt", ".docx"}
 
 # In-memory document storage: typed Pydantic models in UPPER_SNAKE_CASE
 DOCUMENTS_DB: list[DocumentResponse] = []
-documents_db = DOCUMENTS_DB  # Compatibility alias
 
 app = FastAPI(
     title="AI Document Assistant",
@@ -80,28 +80,37 @@ async def upload_document(
             ),
         )
 
-    # Read uploaded bytes to verify content size
-    contents = await file.read()
-    size_bytes = len(contents)
+    # 2. Fast-path check: inspect file.size if populated to avoid unnecessary I/O
+    if file.size is not None and file.size > MAX_FILE_SIZE_BYTES:
+        raise HTTPException(
+            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+            detail=(
+                f"File too large ({file.size} bytes). "
+                f"Maximum allowed size is 10 MB ({MAX_FILE_SIZE_BYTES} bytes)."
+            ),
+        )
 
-    # 2. Validate non-empty file
+    # 3. Stream content in chunks to measure size without buffering huge payloads into memory
+    size_bytes = 0
+    while chunk := await file.read(CHUNK_SIZE_BYTES):
+        size_bytes += len(chunk)
+        if size_bytes > MAX_FILE_SIZE_BYTES:
+            raise HTTPException(
+                status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+                detail=(
+                    f"File too large ({size_bytes} bytes). "
+                    f"Maximum allowed size is 10 MB ({MAX_FILE_SIZE_BYTES} bytes)."
+                ),
+            )
+
+    # 4. Validate non-empty file
     if size_bytes == 0:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Empty file. Uploaded file contains no data.",
         )
 
-    # 3. Validate maximum size limit (10 MB)
-    if size_bytes > MAX_FILE_SIZE_BYTES:
-        raise HTTPException(
-            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
-            detail=(
-                f"File too large ({size_bytes} bytes). "
-                f"Maximum allowed size is 10 MB ({MAX_FILE_SIZE_BYTES} bytes)."
-            ),
-        )
-
-    # Instantiate validated Pydantic model (generates UUID and UTC timestamp via default_factory)
+    # 5. Instantiate validated Pydantic model (generates UUID and UTC timestamp via default_factory)
     doc_record = DocumentResponse(
         filename=filename,
         size_bytes=size_bytes,

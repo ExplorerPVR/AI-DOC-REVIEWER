@@ -12,6 +12,7 @@ A clean, asynchronous FastAPI service for ingesting and cataloging documents (`.
   - Accepts single file uploads via `multipart/form-data`.
   - **Allowed Extensions**: `.pdf`, `.txt`, `.docx`.
   - **Maximum File Size**: 10 MB (10,485,760 bytes).
+  - **Streaming Chunk Validation**: Streams in 1 MB chunks to prevent memory exhaustion on oversized uploads.
   - **In-Memory Catalog**: Metadata stored in memory (`id` as UUID, `filename`, `size_bytes`, `uploaded_at`).
   - **Strict Error Handling**:
     - `400 Bad Request`: Empty file payload.
@@ -213,11 +214,11 @@ uv run pytest -v
 - `HealthResponse`: Schema guaranteeing `{ "status": "ok" }`.
 - `DocumentBase`: Defines core fields shared between models (`filename: str`, `size_bytes: int`).
 - `DocumentCreate`: Schema representing document creation payload attributes.
-- `DocumentResponse`: Inherits from `DocumentBase`, adding `id: str` (UUID v4) and `uploaded_at: datetime` (formatted in ISO 8601).
+- `DocumentResponse`: Inherits from `DocumentBase`, using `default_factory=uuid4` for `id` and `default_factory=lambda: datetime.now(timezone.utc)` for `uploaded_at`.
 - `ErrorResponse`: Standardized schema for client error responses.
 
 ### Request Flow & Validation (`app/main.py`)
 1. **Extension Checking**: `Path(file.filename).suffix.lower()` ensures case-insensitive extension checking against `ALLOWED_EXTENSIONS = {".pdf", ".txt", ".docx"}` before reading file data. Returns `415` if invalid.
-2. **Size & Content Validation**: `await file.read()` reads file bytes. If `len(contents) == 0`, raises `400`. If `len(contents) > 10 * 1024 * 1024`, raises `413`.
-3. **In-Memory Store**: `DOCUMENTS_DB: list[dict] = []` stores document metadata dictionaries. Each new entry receives a unique `str(uuid.uuid4())` identifier and `datetime.now(timezone.utc)`.
+2. **Chunked Streaming & Size Validation**: Checks `file.size` upfront if populated, then streams file content in 1 MB chunks (`CHUNK_SIZE_BYTES = 1024 * 1024`). Rejects immediately with `413` if size exceeds 10 MB, preventing memory exhaustion on huge uploads.
+3. **In-Memory Store**: `DOCUMENTS_DB: list[DocumentResponse] = []` stores strongly-typed Pydantic instances.
 4. **Endpoint Modularity**: All 3 routes include OpenAPI summary, description, and status codes for interactive exploration in `/docs`.
