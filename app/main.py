@@ -1,12 +1,17 @@
 """FastAPI application entrypoint and routes for AI Document Assistant."""
 
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
 import os
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import FastAPI, File, HTTPException, UploadFile, status
+from fastapi import Depends, FastAPI, File, HTTPException, UploadFile, status
+from sqlmodel import Session, select
 
+from app.db import get_session, init_db
 from app.models import (
+    Document,
     DocumentResponse,
     ErrorResponse,
     HealthResponse,
@@ -19,18 +24,24 @@ MAX_FILE_SIZE_BYTES: int = int(
 CHUNK_SIZE_BYTES: int = 1024 * 1024  # 1 MB read chunk size
 ALLOWED_EXTENSIONS: set[str] = {".pdf", ".txt", ".docx"}
 
-# In-memory document storage: typed Pydantic models in UPPER_SNAKE_CASE
-DOCUMENTS_DB: list[DocumentResponse] = []
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+    """Execute startup database initialization and handle clean shutdown."""
+    init_db()
+    yield
+
 
 app = FastAPI(
     title="AI Document Assistant",
     description=(
         "FastAPI service for ingesting and cataloging documents (.pdf, .txt, .docx). "
-        "Provides in-memory metadata storage and health monitoring."
+        "Provides PostgreSQL-backed persistence via SQLModel and containerized deployment."
     ),
-    version="0.1.0",
+    version="0.2.0",
     docs_url="/docs",
     redoc_url="/redoc",
+    lifespan=lifespan,
 )
 
 
@@ -54,7 +65,7 @@ async def health_check() -> HealthResponse:
     summary="Upload a Document",
     description=(
         "Upload a single document (.pdf, .txt, or .docx) up to 10 MB. "
-        "Validates file type and size, storing metadata in memory."
+        "Validates file type and size, storing metadata in PostgreSQL."
     ),
     responses={
         400: {"model": ErrorResponse, "description": "Empty file provided"},
@@ -64,9 +75,10 @@ async def health_check() -> HealthResponse:
     tags=["Documents"],
 )
 async def upload_document(
-    file: Annotated[UploadFile, File(description="Document file to upload (.pdf, .txt, .docx)")]
-) -> DocumentResponse:
-    """Validate uploaded document and record metadata in memory."""
+    file: Annotated[UploadFile, File(description="Document file to upload (.pdf, .txt, .docx)")],
+    session: Annotated[Session, Depends(get_session)],
+) -> Document:
+    """Validate uploaded document and record metadata in PostgreSQL."""
     filename = file.filename or ""
     extension = Path(filename).suffix.lower()
 
@@ -110,14 +122,18 @@ async def upload_document(
             detail="Empty file. Uploaded file contains no data.",
         )
 
-    # 5. Instantiate validated Pydantic model (generates UUID and UTC timestamp via default_factory)
-    doc_record = DocumentResponse(
+    # 5. Extract content type with fallback
+    content_type = file.content_type or "application/octet-stream"
+
+    # 6. Create and persist Document model to database
+    doc_record = Document(
         filename=filename,
+        content_type=content_type,
         size_bytes=size_bytes,
     )
-
-    # Save typed model to in-memory store
-    DOCUMENTS_DB.append(doc_record)
+    session.add(doc_record)
+    session.commit()
+    session.refresh(doc_record)
 
     return doc_record
 
@@ -127,9 +143,13 @@ async def upload_document(
     response_model=list[DocumentResponse],
     status_code=status.HTTP_200_OK,
     summary="List Documents",
-    description="Retrieve metadata for all uploaded documents stored in memory.",
+    description="Retrieve metadata for all uploaded documents stored in PostgreSQL.",
     tags=["Documents"],
 )
-async def list_documents() -> list[DocumentResponse]:
-    """Return all stored document metadata records."""
-    return DOCUMENTS_DB
+async def list_documents(
+    session: Annotated[Session, Depends(get_session)],
+) -> list[Document]:
+    """Return all stored document metadata records from PostgreSQL."""
+    statement = select(Document).order_by(Document.uploaded_at)
+    documents = session.exec(statement).all()
+    return list(documents)
