@@ -1,0 +1,62 @@
+"""Request and response schemas for the AI Document Assistant API."""
+
+from datetime import datetime
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class HealthResponse(BaseModel):
+    """Response schema for the /health status check endpoint."""
+
+    status: str = Field(
+        default="ok",
+        description="Current health status of the service",
+        examples=["ok"],
+    )
+
+
+class DocumentBase(BaseModel):
+    """Base schema holding core document metadata."""
+
+    filename: str = Field(
+        ...,
+        description="Original name of the uploaded document file",
+        examples=["contract.pdf"],
+    )
+    size_bytes: int = Field(
+        ...,
+        description="Total size of the document in bytes",
+        ge=1,
+        examples=[1048576],
+    )
+
+
+class DocumentCreate(DocumentBase):
+    """Schema representing document creation attributes."""
+
+    pass
+
+
+class DocumentResponse(DocumentBase):
+    """Response schema returned upon document upload or retrieval."""
+
+    id: int = Field(
+        ...,
+        description="Unique sequential identifier for the document",
+        examples=[1],
+    )
+    uploaded_at: datetime = Field(
+        ...,
+        description="Timestamp in UTC recording when the document was received",
+    )
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ErrorResponse(BaseModel):
+    """Standard schema returned for client or validation errors."""
+
+    detail: str = Field(
+        ...,
+        description="Human-readable explanation of the validation or operational error",
+        examples=["Unsupported file type '.png'. Allowed types are: .pdf, .txt, .docx"],
+    )
