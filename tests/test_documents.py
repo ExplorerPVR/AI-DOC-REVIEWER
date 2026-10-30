@@ -45,8 +45,7 @@ def client_fixture(session: Session) -> Generator[TestClient, None, None]:
 def test_health_check(client: TestClient):
     """Test 1: Health check endpoint returns status 200 and {'status': 'ok'}."""
     response = client.get("/health")
-    # Deliberately failing assertion for Assignment 5 checklist step 2
-    assert response.status_code == 999
+    assert response.status_code == 200
     assert response.json() == {"status": "ok"}
 
 
