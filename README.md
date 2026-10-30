@@ -1,11 +1,16 @@
 # AI Document Assistant (`ai-doc-assistant`)
+[![CI](https://github.com/ExplorerPVR/AI-DOC-REVIEWER/actions/workflows/ci.yml/badge.svg)](https://github.com/ExplorerPVR/AI-DOC-REVIEWER/actions/workflows/ci.yml)
 
-A production-ready asynchronous FastAPI service for ingesting, validating, and cataloging documents (`.pdf`, `.txt`, `.docx`). This stage introduces **PostgreSQL persistence via SQLModel** and full **Docker container orchestration via Docker Compose**.
+A production-ready asynchronous FastAPI service for ingesting, validating, and cataloging documents (`.pdf`, `.txt`, `.docx`). Features **PostgreSQL persistence via SQLModel**, full **Docker container orchestration**, and **Automated CI with GitHub Actions**.
 
 ---
 
 ## 📋 Features & Specifications
 
+- **Automated CI with GitHub Actions**:
+  - Automatically runs on every push and pull request.
+  - Enforces code quality and formatting via `ruff check .`.
+  - Runs the full test suite via `pytest`.
 - **PostgreSQL Database with SQLModel**:
   - `Document` database table storing:
     - `id`: Unique UUID primary key.
@@ -27,6 +32,9 @@ A production-ready asynchronous FastAPI service for ingesting, validating, and c
 
 ```text
 ai-doc-assistant/
+├── .github/
+│   └── workflows/
+│       └── ci.yml           # Automated CI pipeline (Ruff lint check & Pytest suite)
 ├── app/
 │   ├── __init__.py
 │   ├── db.py                # Database engine, session generator & retry initialization
@@ -51,7 +59,7 @@ ai-doc-assistant/
 ## 🛠️ Prerequisites
 
 - **Docker Desktop** (version 24+ with Docker Compose v2)
-- **Python** (optional for local non-Docker development: `>= 3.12` with `uv`)
+- **Python** (optional for local development: `>= 3.12` with `uv`)
 
 ---
 
@@ -75,8 +83,6 @@ Once started:
 ---
 
 ## 🔄 Verifying Database Persistence Across Restarts
-
-A key requirement of Assignment 4 is that data survives container teardown:
 
 ```bash
 # 1. Upload a document while services are running
@@ -183,20 +189,19 @@ curl -X GET "http://127.0.0.1:8000/documents"
 
 ---
 
-## 🧪 Running Automated Tests
+## 🤖 Continuous Integration (CI) Checks
 
-Run the test suite using `pytest`. The tests use an in-memory SQLite engine via FastAPI dependency overrides and do not require PostgreSQL or Docker:
+The CI pipeline runs automatically on all pushes and pull requests via GitHub Actions (`.github/workflows/ci.yml`).
 
+### Workflow Steps:
+1. **Lint & Code Style**: Runs `uv run ruff check .` to check for style violations, unformatted imports, and common programming errors.
+2. **Automated Testing**: Runs `uv run pytest` to execute the full unit and integration test suite against the in-memory SQLite database.
+
+### Running CI Checks Locally:
 ```bash
+# Run Ruff linting check
+uv run ruff check .
+
+# Run Pytest suite
 uv run pytest -v
 ```
-
-### Test Coverage:
-1. `test_health_check`: Verifies `GET /health` returns `200 OK`.
-2. `test_upload_document_success`: Verifies valid upload returns `201 Created`, correct metadata, and stores into the database.
-3. `test_upload_document_empty_file`: Verifies 0-byte upload returns `400 Bad Request` and does not insert rows into the database.
-4. `test_upload_document_wrong_file_type`: Verifies disallowed extensions return `415 Unsupported Media Type`.
-5. `test_upload_document_file_too_large`: Verifies files exceeding 10 MB return `413 Content Too Large`.
-6. `test_list_documents`: Verifies `GET /documents` reads all records from the database table.
-7. `test_upload_docx_and_case_insensitive_extension`: Verifies `.docx` and uppercase extensions persist with appropriate MIME types.
-8. `test_database_persistence_across_sessions`: Verifies document records persist across distinct database sessions.

@@ -1,8 +1,8 @@
 """FastAPI application entrypoint and routes for AI Document Assistant."""
 
+import os
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
-import os
 from pathlib import Path
 from typing import Annotated
 
@@ -19,7 +19,7 @@ from app.models import (
 
 # Constants for document upload validation
 MAX_FILE_SIZE_BYTES: int = int(
-    os.getenv("MAX_FILE_SIZE_BYTES", 10 * 1024 * 1024)
+    os.getenv("MAX_FILE_SIZE_BYTES", str(10 * 1024 * 1024))
 )  # 10 MB limit
 CHUNK_SIZE_BYTES: int = 1024 * 1024  # 1 MB read chunk size
 ALLOWED_EXTENSIONS: set[str] = {".pdf", ".txt", ".docx"}
@@ -36,7 +36,7 @@ app = FastAPI(
     title="AI Document Assistant",
     description=(
         "FastAPI service for ingesting and cataloging documents (.pdf, .txt, .docx). "
-        "Provides PostgreSQL-backed persistence via SQLModel and containerized deployment."
+        "Provides PostgreSQL-backed persistence and containerized deployment."
     ),
     version="0.2.0",
     docs_url="/docs",
@@ -75,7 +75,10 @@ async def health_check() -> HealthResponse:
     tags=["Documents"],
 )
 async def upload_document(
-    file: Annotated[UploadFile, File(description="Document file to upload (.pdf, .txt, .docx)")],
+    file: Annotated[
+        UploadFile,
+        File(description="Document file to upload (.pdf, .txt, .docx)"),
+    ],
     session: Annotated[Session, Depends(get_session)],
 ) -> Document:
     """Validate uploaded document and record metadata in PostgreSQL."""
@@ -102,7 +105,7 @@ async def upload_document(
             ),
         )
 
-    # 3. Stream content in chunks to measure size without buffering huge payloads into memory
+    # 3. Stream content in chunks to measure size without buffering into memory
     size_bytes = 0
     while chunk := await file.read(CHUNK_SIZE_BYTES):
         size_bytes += len(chunk)
