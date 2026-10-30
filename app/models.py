@@ -1,63 +1,69 @@
-"""Request and response schemas for the AI Document Assistant API."""
+"""SQLModel database models and Pydantic schemas for AI Document Assistant."""
 
 from datetime import datetime, timezone
 from uuid import UUID, uuid4
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, Field as PydanticField
+from sqlmodel import Field as SQLModelField, SQLModel
 
 
 class HealthResponse(BaseModel):
     """Response schema for the /health status check endpoint."""
 
-    status: str = Field(
+    status: str = PydanticField(
         default="ok",
         description="Current health status of the service",
         examples=["ok"],
     )
 
 
-class DocumentBase(BaseModel):
-    """Base schema holding core document metadata."""
+class DocumentBase(SQLModel):
+    """Base schema holding common document metadata fields."""
 
-    filename: str = Field(
-        ...,
+    filename: str = SQLModelField(
         description="Original name of the uploaded document file",
-        examples=["contract.pdf"],
     )
-    size_bytes: int = Field(
-        ...,
+    content_type: str = SQLModelField(
+        default="application/octet-stream",
+        description="MIME type of the uploaded document",
+    )
+    size_bytes: int = SQLModelField(
         description="Total size of the document in bytes",
         ge=1,
-        examples=[1048576],
     )
 
 
-class DocumentCreate(DocumentBase):
-    """Schema representing document creation attributes."""
+class Document(DocumentBase, table=True):
+    """SQLModel database table model for persisting document metadata."""
 
-    pass
+    __tablename__ = "documents"
+
+    id: UUID = SQLModelField(
+        default_factory=uuid4,
+        primary_key=True,
+        index=True,
+        description="Unique UUID primary key for the document",
+    )
+    uploaded_at: datetime = SQLModelField(
+        default_factory=lambda: datetime.now(timezone.utc),
+        description="Timestamp in UTC recording when the document was received",
+    )
 
 
 class DocumentResponse(DocumentBase):
     """Response schema returned upon document upload or retrieval."""
 
-    id: UUID = Field(
-        default_factory=uuid4,
+    id: UUID = SQLModelField(
         description="Unique UUID identifier for the document",
-        examples=["550e8400-e29b-41d4-a716-446655440000"],
     )
-    uploaded_at: datetime = Field(
-        default_factory=lambda: datetime.now(timezone.utc),
+    uploaded_at: datetime = SQLModelField(
         description="Timestamp in UTC recording when the document was received",
     )
-
-    model_config = ConfigDict(from_attributes=True)
 
 
 class ErrorResponse(BaseModel):
     """Standard schema returned for client or validation errors."""
 
-    detail: str = Field(
-        ...,
+    detail: str = PydanticField(
         description="Human-readable explanation of the validation or operational error",
         examples=["Unsupported file type '.png'. Allowed types are: .pdf, .txt, .docx"],
     )

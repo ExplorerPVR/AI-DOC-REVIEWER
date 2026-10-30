@@ -1,26 +1,26 @@
 # AI Document Assistant (`ai-doc-assistant`)
-> **Assignment 3: Practice Project – FastAPI Basics**
+> **Assignment 4: Database and Docker**
 
-A clean, asynchronous FastAPI service for ingesting and cataloging documents (`.pdf`, `.txt`, `.docx`). This project represents the foundational stage of an AI Assistant that will later answer questions over uploaded documents using LLMs and RAG (Retrieval-Augmented Generation).
+A production-ready asynchronous FastAPI service for ingesting, validating, and cataloging documents (`.pdf`, `.txt`, `.docx`). This stage introduces **PostgreSQL persistence via SQLModel** and full **Docker container orchestration via Docker Compose**.
 
 ---
 
 ## 📋 Features & Specifications
 
-- **Health Check Probe (`GET /health`)**: Returns `200 OK` with `{"status": "ok"}`.
-- **Document Upload (`POST /documents`)**:
-  - Accepts single file uploads via `multipart/form-data`.
-  - **Allowed Extensions**: `.pdf`, `.txt`, `.docx`.
-  - **Maximum File Size**: 10 MB (10,485,760 bytes).
-  - **Streaming Chunk Validation**: Streams in 1 MB chunks to prevent memory exhaustion on oversized uploads.
-  - **In-Memory Catalog**: Metadata stored in memory (`id` as UUID, `filename`, `size_bytes`, `uploaded_at`).
-  - **Strict Error Handling**:
-    - `400 Bad Request`: Empty file payload.
-    - `415 Unsupported Media Type`: Disallowed file extension.
-    - `413 Content Too Large`: Payload exceeds 10 MB limit.
-    - `201 Created`: Successful upload returning file metadata.
-- **List Documents (`GET /documents`)**: Returns `200 OK` and a JSON array of all stored documents.
-- **Interactive Documentation**: Available out-of-the-box via Swagger UI (`/docs`) and ReDoc (`/redoc`).
+- **PostgreSQL Database with SQLModel**:
+  - `Document` database table storing:
+    - `id`: Unique UUID primary key.
+    - `filename`: Original name of the uploaded document.
+    - `content_type`: MIME type (e.g. `application/pdf`, `text/plain`).
+    - `size_bytes`: File size in bytes.
+    - `uploaded_at`: UTC timestamp.
+  - Dynamic connection resolution reading `DATABASE_URL` from `.env`.
+- **Full Docker Containerization**:
+  - **`app` Service**: FastAPI service running in a minimal Python 3.12 container with `uv`.
+  - **`db` Service**: PostgreSQL 16 container with health check (`pg_isready`) and automated connection retries.
+  - **Volume Persistence**: Named volume `postgres_data` ensures uploaded documents and metadata survive container restarts (`docker compose down` and `docker compose up`).
+- **Zero-Secret Hardcoding**: All credentials and database URLs are loaded from `.env` (template in `.env.example`).
+- **Standalone Test Suite**: Automated tests use an in-memory SQLite engine via FastAPI dependency overrides (`get_session`), passing completely standalone without requiring PostgreSQL running.
 
 ---
 
@@ -30,89 +30,82 @@ A clean, asynchronous FastAPI service for ingesting and cataloging documents (`.
 ai-doc-assistant/
 ├── app/
 │   ├── __init__.py
-│   ├── main.py              # FastAPI app definition, routes, validation & in-memory store
-│   └── models.py            # Pydantic request, response, and error schemas
+│   ├── db.py                # Database engine, session generator & retry initialization
+│   ├── main.py              # FastAPI app, lifespan, route handlers & validation
+│   └── models.py            # SQLModel table model & Pydantic response schemas
 ├── tests/
 │   ├── __init__.py
-│   └── test_documents.py    # TestClient test suite (7 comprehensive test cases)
-├── .env                     # Local environment variables (gitignored)
+│   └── test_documents.py    # 8 automated tests with in-memory SQLite fixture
+├── .dockerignore            # Excludes caches, .venv, .git, and .env from Docker context
+├── .env                     # Local environment & DB credentials (gitignored)
 ├── .env.example             # Template environment variables (committed)
 ├── .gitignore               # Excludes caches, .venv, .env, and generated data
+├── docker-compose.yml       # Two-service stack (app + postgres:16 with persistent volume)
+├── Dockerfile               # Multi-stage container build with Astral uv
 ├── pyproject.toml           # Project dependencies managed via uv
 ├── uv.lock                  # Deterministic dependency lockfile
-└── README.md                # Project documentation and run guide
+└── README.md                # Comprehensive documentation and run guide
 ```
 
 ---
 
 ## 🛠️ Prerequisites
 
-- **Python**: `>= 3.12`
-- **uv**: Fast Python package manager ([Astral uv](https://docs.astral.sh/uv/))
-
-To install `uv` (if not already installed):
-```bash
-# Windows (PowerShell)
-powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
-
-# Linux / macOS
-curl -LsSf https://astral.sh/uv/install.sh | sh
-```
+- **Docker Desktop** (version 24+ with Docker Compose v2)
+- **Python** (optional for local non-Docker development: `>= 3.12` with `uv`)
 
 ---
 
-## 🚀 Setup & Installation
+## 🚀 Quickstart: Run with Docker Compose
 
-1. **Clone the repository and enter the directory**:
-   ```bash
-   git clone <repo-url>
-   cd "Assignment 2 Agix"
-   ```
+Run the entire application stack (PostgreSQL + FastAPI) with a single command:
 
-2. **Configure environment variables**:
-   Copy the example environment template to `.env`:
-   ```bash
-   cp .env.example .env
-   ```
+```bash
+# 1. Copy sample environment file
+cp .env.example .env
 
-3. **Install dependencies and create virtual environment**:
-   Using `uv`, synchronize project dependencies from `uv.lock`:
-   ```bash
-   uv sync
-   ```
+# 2. Build and start services in detached mode
+docker compose up -d --build
+```
+
+Once started:
+- **Interactive Swagger UI**: [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)
+- **Alternative ReDoc UI**: [http://127.0.0.1:8000/redoc](http://127.0.0.1:8000/redoc)
+- **Service Health Probe**: [http://127.0.0.1:8000/health](http://127.0.0.1:8000/health)
 
 ---
 
-## ▶️ Running the Application
+## 🔄 Verifying Database Persistence Across Restarts
 
-Start the local development server with auto-reload:
+A key requirement of Assignment 4 is that data survives container teardown:
 
 ```bash
-uv run uvicorn app.main:app --reload --port 8000
+# 1. Upload a document while services are running
+curl -X POST "http://127.0.0.1:8000/documents" \
+  -F "file=@sample.txt"
+
+# 2. Stop and remove containers
+docker compose down
+
+# 3. Start services again
+docker compose up -d
+
+# 4. Verify the document is still present in PostgreSQL
+curl -X GET "http://127.0.0.1:8000/documents"
 ```
-
-The service will start at `http://127.0.0.1:8000`.
-
-- **Swagger UI (Interactive API Docs)**: [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)
-- **ReDoc UI**: [http://127.0.0.1:8000/redoc](http://127.0.0.1:8000/redoc)
-
-All 3 endpoints can be tested directly from the Swagger UI at `/docs`.
+The uploaded document metadata remains intact because the `postgres_data` volume preserves the PostgreSQL database across container lifecycles.
 
 ---
 
 ## 🧪 API Endpoints & `curl` Examples
 
 ### 1. Health Check
-Checks if the API service is up and operational.
-
 - **URL**: `GET /health`
 - **Status**: `200 OK`
 
 ```bash
 curl -X GET "http://127.0.0.1:8000/health"
 ```
-
-**Response**:
 ```json
 {
   "status": "ok"
@@ -122,7 +115,7 @@ curl -X GET "http://127.0.0.1:8000/health"
 ---
 
 ### 2. Upload Document
-Uploads a document (`.pdf`, `.txt`, `.docx`), validates its extension and byte size, and stores its metadata in memory with a unique UUID.
+Uploads a document (`.pdf`, `.txt`, `.docx`), validates type and size, and persists metadata in PostgreSQL.
 
 - **URL**: `POST /documents`
 - **Content-Type**: `multipart/form-data`
@@ -130,16 +123,17 @@ Uploads a document (`.pdf`, `.txt`, `.docx`), validates its extension and byte s
 
 ```bash
 curl -X POST "http://127.0.0.1:8000/documents" \
-  -F "file=@sample.txt"
+  -F "file=@agreement.pdf"
 ```
 
 **Response (`201 Created`)**:
 ```json
 {
   "id": "550e8400-e29b-41d4-a716-446655440000",
-  "filename": "sample.txt",
-  "size_bytes": 38,
-  "uploaded_at": "2026-10-28T13:00:00.123456Z"
+  "filename": "agreement.pdf",
+  "content_type": "application/pdf",
+  "size_bytes": 1048576,
+  "uploaded_at": "2026-10-29T14:30:00.123456Z"
 }
 ```
 
@@ -166,7 +160,7 @@ curl -X POST "http://127.0.0.1:8000/documents" \
 ---
 
 ### 3. List Documents
-Returns an array of all uploaded documents recorded in memory.
+Fetches all stored document records from PostgreSQL.
 
 - **URL**: `GET /documents`
 - **Status**: `200 OK`
@@ -180,9 +174,10 @@ curl -X GET "http://127.0.0.1:8000/documents"
 [
   {
     "id": "550e8400-e29b-41d4-a716-446655440000",
-    "filename": "sample.txt",
-    "size_bytes": 38,
-    "uploaded_at": "2026-10-28T13:00:00.123456Z"
+    "filename": "agreement.pdf",
+    "content_type": "application/pdf",
+    "size_bytes": 1048576,
+    "uploaded_at": "2026-10-29T14:30:00.123456Z"
   }
 ]
 ```
@@ -191,34 +186,18 @@ curl -X GET "http://127.0.0.1:8000/documents"
 
 ## 🧪 Running Automated Tests
 
-Run the test suite using `pytest` inside the virtual environment:
+Run the test suite using `pytest`. The tests use an in-memory SQLite engine via FastAPI dependency overrides and do not require PostgreSQL or Docker:
 
 ```bash
 uv run pytest -v
 ```
 
-### Test Coverage Breakdown:
-1. `test_health_check`: Verifies `GET /health` returns `200 OK` and `{"status": "ok"}`.
-2. `test_upload_document_success`: Verifies valid `.txt` upload returns `201 Created` with expected fields and a valid UUID (`id`, `filename`, `size_bytes`, `uploaded_at`).
-3. `test_upload_document_empty_file`: Verifies 0-byte file upload returns `400 Bad Request` with an informative error message.
-4. `test_upload_document_wrong_file_type`: Verifies unsupported extensions (e.g., `.png`) return `415 Unsupported Media Type`.
+### Test Coverage:
+1. `test_health_check`: Verifies `GET /health` returns `200 OK`.
+2. `test_upload_document_success`: Verifies valid upload returns `201 Created`, correct metadata, and stores into the database.
+3. `test_upload_document_empty_file`: Verifies 0-byte upload returns `400 Bad Request` and does not insert rows into the database.
+4. `test_upload_document_wrong_file_type`: Verifies disallowed extensions return `415 Unsupported Media Type`.
 5. `test_upload_document_file_too_large`: Verifies files exceeding 10 MB return `413 Content Too Large`.
-6. `test_list_documents`: Verifies `GET /documents` initially returns `[]` and returns all uploaded document metadata with unique UUIDs.
-7. `test_upload_docx_and_case_insensitive_extension`: Verifies uppercase extensions and Word `.docx` documents upload properly.
-
----
-
-## 🔍 Code Explanation & Technical Design
-
-### Pydantic Models (`app/models.py`)
-- `HealthResponse`: Schema guaranteeing `{ "status": "ok" }`.
-- `DocumentBase`: Defines core fields shared between models (`filename: str`, `size_bytes: int`).
-- `DocumentCreate`: Schema representing document creation payload attributes.
-- `DocumentResponse`: Inherits from `DocumentBase`, using `default_factory=uuid4` for `id` and `default_factory=lambda: datetime.now(timezone.utc)` for `uploaded_at`.
-- `ErrorResponse`: Standardized schema for client error responses.
-
-### Request Flow & Validation (`app/main.py`)
-1. **Extension Checking**: `Path(file.filename).suffix.lower()` ensures case-insensitive extension checking against `ALLOWED_EXTENSIONS = {".pdf", ".txt", ".docx"}` before reading file data. Returns `415` if invalid.
-2. **Chunked Streaming & Size Validation**: Checks `file.size` upfront if populated, then streams file content in 1 MB chunks (`CHUNK_SIZE_BYTES = 1024 * 1024`). Rejects immediately with `413` if size exceeds 10 MB, preventing memory exhaustion on huge uploads.
-3. **In-Memory Store**: `DOCUMENTS_DB: list[DocumentResponse] = []` stores strongly-typed Pydantic instances.
-4. **Endpoint Modularity**: All 3 routes include OpenAPI summary, description, and status codes for interactive exploration in `/docs`.
+6. `test_list_documents`: Verifies `GET /documents` reads all records from the database table.
+7. `test_upload_docx_and_case_insensitive_extension`: Verifies `.docx` and uppercase extensions persist with appropriate MIME types.
+8. `test_database_persistence_across_sessions`: Verifies document records persist across distinct database sessions.

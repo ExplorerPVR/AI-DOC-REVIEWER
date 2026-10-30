@@ -1,24 +1,44 @@
-"""Unit and integration tests for FastAPI document assistant endpoints."""
+"""Unit and integration tests for FastAPI document assistant endpoints with SQLite in-memory fixtures."""
 
+from collections.abc import Generator
 import uuid
 import pytest
 from fastapi.testclient import TestClient
+from sqlmodel import Session, SQLModel, create_engine, select
+from sqlmodel.pool import StaticPool
 
-from app.main import app, DOCUMENTS_DB
+from app.db import get_session
+from app.main import app
+from app.models import Document
+
+# Test in-memory SQLite database engine
+test_engine = create_engine(
+    "sqlite:///:memory:",
+    connect_args={"check_same_thread": False},
+    poolclass=StaticPool,
+)
 
 
-@pytest.fixture(autouse=True)
-def reset_in_memory_db():
-    """Ensure in-memory documents list is reset before and after every test."""
-    DOCUMENTS_DB.clear()
-    yield
-    DOCUMENTS_DB.clear()
+@pytest.fixture(name="session")
+def session_fixture() -> Generator[Session, None, None]:
+    """Provide a fresh, isolated database session for each test."""
+    SQLModel.metadata.create_all(test_engine)
+    with Session(test_engine) as session:
+        yield session
+    SQLModel.metadata.drop_all(test_engine)
 
 
-@pytest.fixture
-def client() -> TestClient:
-    """Fixture providing a FastAPI TestClient instance."""
-    return TestClient(app)
+@pytest.fixture(name="client")
+def client_fixture(session: Session) -> Generator[TestClient, None, None]:
+    """Provide a TestClient with the database session dependency overridden."""
+
+    def get_session_override() -> Generator[Session, None, None]:
+        yield session
+
+    app.dependency_overrides[get_session] = get_session_override
+    client = TestClient(app)
+    yield client
+    app.dependency_overrides.clear()
 
 
 def test_health_check(client: TestClient):
@@ -28,9 +48,9 @@ def test_health_check(client: TestClient):
     assert response.json() == {"status": "ok"}
 
 
-def test_upload_document_success(client: TestClient):
-    """Test 2: Successful upload returns status 201 with metadata and unique UUID."""
-    file_content = b"This is a sample document for testing."
+def test_upload_document_success(client: TestClient, session: Session):
+    """Test 2: Successful upload returns status 201 with metadata and stores in database."""
+    file_content = b"This is a sample document for testing database persistence."
     files = {"file": ("sample.txt", file_content, "text/plain")}
 
     response = client.post("/documents", files=files)
@@ -39,12 +59,20 @@ def test_upload_document_success(client: TestClient):
     data = response.json()
     assert uuid.UUID(data["id"], version=4)
     assert data["filename"] == "sample.txt"
+    assert data["content_type"] == "text/plain"
     assert data["size_bytes"] == len(file_content)
     assert "uploaded_at" in data
 
+    # Verify document exists in database
+    db_doc = session.get(Document, uuid.UUID(data["id"]))
+    assert db_doc is not None
+    assert db_doc.filename == "sample.txt"
+    assert db_doc.content_type == "text/plain"
+    assert db_doc.size_bytes == len(file_content)
 
-def test_upload_document_empty_file(client: TestClient):
-    """Test 3: Empty file upload returns status 400 with a clear error message."""
+
+def test_upload_document_empty_file(client: TestClient, session: Session):
+    """Test 3: Empty file upload returns status 400 and does not write to database."""
     files = {"file": ("empty.txt", b"", "text/plain")}
 
     response = client.post("/documents", files=files)
@@ -53,8 +81,12 @@ def test_upload_document_empty_file(client: TestClient):
     data = response.json()
     assert "Empty file" in data["detail"]
 
+    # Verify no documents inserted
+    docs = session.exec(select(Document)).all()
+    assert len(docs) == 0
 
-def test_upload_document_wrong_file_type(client: TestClient):
+
+def test_upload_document_wrong_file_type(client: TestClient, session: Session):
     """Test 4: Uploading unsupported file type returns status 415."""
     files = {"file": ("photo.png", b"\x89PNG\r\n\x1a\n", "image/png")}
 
@@ -67,8 +99,11 @@ def test_upload_document_wrong_file_type(client: TestClient):
     assert ".txt" in data["detail"]
     assert ".docx" in data["detail"]
 
+    docs = session.exec(select(Document)).all()
+    assert len(docs) == 0
 
-def test_upload_document_file_too_large(client: TestClient):
+
+def test_upload_document_file_too_large(client: TestClient, session: Session):
     """Test 5: Uploading file larger than 10 MB returns status 413."""
     oversized_bytes = 10 * 1024 * 1024 + 1  # 10 MB + 1 byte
     oversized_content = b"x" * oversized_bytes
@@ -80,9 +115,12 @@ def test_upload_document_file_too_large(client: TestClient):
     data = response.json()
     assert "File too large" in data["detail"]
 
+    docs = session.exec(select(Document)).all()
+    assert len(docs) == 0
+
 
 def test_list_documents(client: TestClient):
-    """Test 6: Listing documents returns status 200 and previously uploaded documents with unique IDs."""
+    """Test 6: Listing documents returns status 200 and previously stored database records."""
     # Verify initially empty
     initial_res = client.get("/documents")
     assert initial_res.status_code == 200
@@ -107,8 +145,9 @@ def test_list_documents(client: TestClient):
     assert uuid.UUID(docs[0]["id"], version=4)
     assert uuid.UUID(docs[1]["id"], version=4)
     assert docs[0]["filename"] == "doc1.txt"
-    assert docs[0]["size_bytes"] == len(b"First doc content")
+    assert docs[0]["content_type"] == "text/plain"
     assert docs[1]["filename"] == "doc2.pdf"
+    assert docs[1]["content_type"] == "application/pdf"
 
 
 def test_upload_docx_and_case_insensitive_extension(client: TestClient):
@@ -124,4 +163,20 @@ def test_upload_docx_and_case_insensitive_extension(client: TestClient):
     assert response.status_code == 201
     data = response.json()
     assert data["filename"] == "agreement.DOCX"
+    assert data["content_type"] == "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
     assert uuid.UUID(data["id"], version=4)
+
+
+def test_database_persistence_across_sessions(client: TestClient):
+    """Test 8: Verify data persists across separate database operations in the test engine."""
+    file_data = {"file": ("persisted.pdf", b"%PDF-persisted", "application/pdf")}
+    res = client.post("/documents", files=file_data)
+    assert res.status_code == 201
+    doc_id = res.json()["id"]
+
+    # Verify query in a brand new isolated session against the same engine
+    with Session(test_engine) as new_session:
+        retrieved = new_session.get(Document, uuid.UUID(doc_id))
+        assert retrieved is not None
+        assert retrieved.filename == "persisted.pdf"
+        assert retrieved.content_type == "application/pdf"
