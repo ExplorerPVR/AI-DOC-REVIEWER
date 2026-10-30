@@ -2,7 +2,13 @@ name: CI
 
 on:
   push:
+    branches:
+      - main
+      - development
   pull_request:
+    branches:
+      - main
+      - development
 
 jobs:
   lint-and-test:
@@ -24,7 +30,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: uv sync
+        run: uv sync --locked
 
       - name: Run Ruff Check
         run: uv run ruff check .
