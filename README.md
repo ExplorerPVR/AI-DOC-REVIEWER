@@ -1,5 +1,4 @@
 # AI Document Assistant (`ai-doc-assistant`)
-> **Assignment 4: Database and Docker**
 
 A production-ready asynchronous FastAPI service for ingesting, validating, and cataloging documents (`.pdf`, `.txt`, `.docx`). This stage introduces **PostgreSQL persistence via SQLModel** and full **Docker container orchestration via Docker Compose**.
 
