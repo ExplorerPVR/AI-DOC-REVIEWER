@@ -1,8 +1,9 @@
 """Database engine, session management, and table initialization."""
 
-from collections.abc import Generator
 import os
 import time
+from collections.abc import Generator
+
 from dotenv import load_dotenv
 from sqlalchemy.exc import OperationalError
 from sqlmodel import Session, SQLModel, create_engine
@@ -28,7 +29,7 @@ engine = create_engine(
 
 
 def init_db(engine_override=None, retries: int = 5, delay: float = 2.0) -> None:
-    """Initialize database tables with automatic connection retry logic for Docker startup."""
+    """Initialize database tables with connection retry logic for Docker startup."""
     target_engine = engine_override or engine
     for attempt in range(1, retries + 1):
         try:

@@ -1,7 +1,8 @@
-"""Unit and integration tests for FastAPI document assistant endpoints with SQLite in-memory fixtures."""
+"""Unit and integration tests for FastAPI document assistant endpoints."""
 
-from collections.abc import Generator
 import uuid
+from collections.abc import Generator
+
 import pytest
 from fastapi.testclient import TestClient
 from sqlmodel import Session, SQLModel, create_engine, select
@@ -49,7 +50,7 @@ def test_health_check(client: TestClient):
 
 
 def test_upload_document_success(client: TestClient, session: Session):
-    """Test 2: Successful upload returns status 201 with metadata and stores in database."""
+    """Test 2: Successful upload returns 201 with metadata and stores in DB."""
     file_content = b"This is a sample document for testing database persistence."
     files = {"file": ("sample.txt", file_content, "text/plain")}
 
@@ -72,7 +73,7 @@ def test_upload_document_success(client: TestClient, session: Session):
 
 
 def test_upload_document_empty_file(client: TestClient, session: Session):
-    """Test 3: Empty file upload returns status 400 and does not write to database."""
+    """Test 3: Empty file upload returns status 400 and does not write to DB."""
     files = {"file": ("empty.txt", b"", "text/plain")}
 
     response = client.post("/documents", files=files)
@@ -120,7 +121,7 @@ def test_upload_document_file_too_large(client: TestClient, session: Session):
 
 
 def test_list_documents(client: TestClient):
-    """Test 6: Listing documents returns status 200 and previously stored database records."""
+    """Test 6: Listing documents returns status 200 and previously stored records."""
     # Verify initially empty
     initial_res = client.get("/documents")
     assert initial_res.status_code == 200
@@ -163,12 +164,15 @@ def test_upload_docx_and_case_insensitive_extension(client: TestClient):
     assert response.status_code == 201
     data = response.json()
     assert data["filename"] == "agreement.DOCX"
-    assert data["content_type"] == "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    expected_type = (
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    )
+    assert data["content_type"] == expected_type
     assert uuid.UUID(data["id"], version=4)
 
 
 def test_database_persistence_across_sessions(client: TestClient):
-    """Test 8: Verify data persists across separate database operations in the test engine."""
+    """Test 8: Verify data persists across separate database operations."""
     file_data = {"file": ("persisted.pdf", b"%PDF-persisted", "application/pdf")}
     res = client.post("/documents", files=file_data)
     assert res.status_code == 201
