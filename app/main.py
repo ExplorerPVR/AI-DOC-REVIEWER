@@ -1,5 +1,6 @@
 """FastAPI application entrypoint and routes for AI Document Assistant."""
 
+import io
 import os
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
@@ -16,6 +17,7 @@ from app.models import (
     ErrorResponse,
     HealthResponse,
 )
+from app.validator import validate_document_content
 
 # Constants for document upload validation
 MAX_FILE_SIZE_BYTES: int = int(
@@ -68,7 +70,7 @@ async def health_check() -> HealthResponse:
         "Validates file type and size, storing metadata in PostgreSQL."
     ),
     responses={
-        400: {"model": ErrorResponse, "description": "Empty file provided"},
+        400: {"model": ErrorResponse, "description": "Empty or corrupted file"},
         413: {"model": ErrorResponse, "description": "File exceeds 10 MB maximum size"},
         415: {"model": ErrorResponse, "description": "Unsupported file extension"},
     },
@@ -105,8 +107,9 @@ async def upload_document(
             ),
         )
 
-    # 3. Stream content in chunks to measure size without buffering into memory
+    # 3. Stream content in chunks to measure size without buffering huge payloads
     size_bytes = 0
+    buffer = io.BytesIO()
     while chunk := await file.read(CHUNK_SIZE_BYTES):
         size_bytes += len(chunk)
         if size_bytes > MAX_FILE_SIZE_BYTES:
@@ -117,13 +120,12 @@ async def upload_document(
                     f"Maximum allowed size is 10 MB ({MAX_FILE_SIZE_BYTES} bytes)."
                 ),
             )
+        buffer.write(chunk)
 
-    # 4. Validate non-empty file
-    if size_bytes == 0:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Empty file. Uploaded file contains no data.",
-        )
+    file_bytes = buffer.getvalue()
+
+    # 4. Content validation (catches empty, whitespace-only, blank & corrupt docs)
+    validate_document_content(file_bytes=file_bytes, filename=filename)
 
     # 5. Extract content type with fallback
     content_type = file.content_type or "application/octet-stream"
