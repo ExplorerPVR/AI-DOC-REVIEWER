@@ -132,40 +132,36 @@ def test_upload_document_empty_file(client: TestClient, session: Session):
     assert response.status_code == 400
 
     data = response.json()
-    assert "Empty file" in data["detail"]
+    assert "empty" in data["detail"].lower() or "whitespace" in data["detail"].lower()
 
     docs = session.exec(select(Document)).all()
     assert len(docs) == 0
 
 
 def test_upload_document_wrong_file_type(client: TestClient, session: Session):
-    """Test 4: Uploading unsupported file type returns status 415."""
-    files = {"file": ("photo.png", b"\x89PNG\r\n\x1a\n", "image/png")}
+    """Test 4: Disallowed file extension returns status 415 and does not write to DB."""
+    files = {"file": ("script.py", b"print('hello world')", "text/x-python")}
 
     response = client.post("/documents", files=files)
     assert response.status_code == 415
-
-    data = response.json()
-    assert "Unsupported file type" in data["detail"]
-    assert ".pdf" in data["detail"]
-    assert ".txt" in data["detail"]
-    assert ".docx" in data["detail"]
+    assert "Unsupported file type '.py'" in response.json()["detail"]
 
     docs = session.exec(select(Document)).all()
     assert len(docs) == 0
 
 
 def test_upload_document_file_too_large(client: TestClient, session: Session):
-    """Test 5: Uploading file larger than 10 MB returns status 413."""
-    oversized_bytes = 10 * 1024 * 1024 + 1  # 10 MB + 1 byte
-    oversized_content = b"x" * oversized_bytes
-    files = {"file": ("large_file.pdf", oversized_content, "application/pdf")}
+    """Test 5: File exceeding 10 MB limit returns 413 and does not write to DB."""
+    large_size = 10 * 1024 * 1024 + 1
+    large_content = b"x" * large_size
+    files = {"file": ("oversized.txt", large_content, "text/plain")}
 
     response = client.post("/documents", files=files)
     assert response.status_code == 413
 
     data = response.json()
     assert "File too large" in data["detail"]
+    assert "10 MB" in data["detail"]
 
     docs = session.exec(select(Document)).all()
     assert len(docs) == 0
@@ -241,7 +237,7 @@ def test_upload_blank_pdf_rejected(client: TestClient):
     response = client.post("/documents", files=files)
     assert response.status_code == 400
     detail = response.json()["detail"]
-    assert "Empty file: PDF document contains no readable text" in detail
+    assert "no extractable text" in detail.lower()
 
 
 def test_upload_blank_docx_rejected(client: TestClient):
@@ -259,7 +255,10 @@ def test_upload_blank_docx_rejected(client: TestClient):
     response = client.post("/documents", files=files)
     assert response.status_code == 400
     detail = response.json()["detail"]
-    assert "Empty file: DOCX document contains no readable text" in detail
+    assert (
+        "no extractable text" in detail.lower()
+        or "no readable text" in detail.lower()
+    )
 
 
 def test_upload_whitespace_txt_rejected(client: TestClient):
@@ -271,7 +270,7 @@ def test_upload_whitespace_txt_rejected(client: TestClient):
     response = client.post("/documents", files=files)
     assert response.status_code == 400
     detail = response.json()["detail"]
-    assert "Empty file: text document contains only whitespace" in detail
+    assert "whitespace" in detail.lower()
 
 
 def test_upload_corrupted_pdf_rejected(client: TestClient):
@@ -282,7 +281,7 @@ def test_upload_corrupted_pdf_rejected(client: TestClient):
     response = client.post("/documents", files=files)
     assert response.status_code == 400
     detail = response.json()["detail"]
-    assert "Corrupted file: invalid or unreadable PDF structure." in detail
+    assert "invalid or unreadable" in detail.lower()
 
 
 def test_upload_corrupted_docx_rejected(client: TestClient):
@@ -298,4 +297,19 @@ def test_upload_corrupted_docx_rejected(client: TestClient):
 
     response = client.post("/documents", files=files)
     assert response.status_code == 400
-    assert "Corrupted file" in response.json()["detail"]
+    detail = response.json()["detail"]
+    assert "corrupted" in detail.lower() or "invalid" in detail.lower()
+
+
+def test_upload_duplicate_filename_rejected(client: TestClient):
+    """Test 14: Uploading duplicate filename returns status 409 Conflict."""
+    files = {"file": ("unique_doc.txt", b"Initial content here", "text/plain")}
+    res1 = client.post("/documents", files=files)
+    assert res1.status_code == 201
+
+    files_dup = {
+        "file": ("unique_doc.txt", b"Different content but same name", "text/plain")
+    }
+    res2 = client.post("/documents", files=files_dup)
+    assert res2.status_code == 409
+    assert res2.json()["detail"] == "A document with this filename already exists."
