@@ -3,8 +3,6 @@
 import io
 import os
 import zipfile
-from collections.abc import AsyncGenerator
-from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated
 
@@ -14,7 +12,7 @@ from pypdf import PdfReader
 from pypdf.errors import PdfReadError
 from sqlmodel import Session, select
 
-from app.db import get_session, init_db
+from app.db import get_session
 from app.models import (
     Document,
     DocumentResponse,
@@ -29,14 +27,6 @@ MAX_FILE_SIZE_BYTES: int = int(
 CHUNK_SIZE_BYTES: int = 1024 * 1024  # 1 MB read chunk size
 ALLOWED_EXTENSIONS: set[str] = {".pdf", ".txt", ".docx"}
 
-
-@asynccontextmanager
-async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
-    """Execute startup database initialization and handle clean shutdown."""
-    init_db()
-    yield
-
-
 app = FastAPI(
     title="AI Document Assistant",
     description=(
@@ -46,7 +36,6 @@ app = FastAPI(
     version="0.2.0",
     docs_url="/docs",
     redoc_url="/redoc",
-    lifespan=lifespan,
 )
 
 
