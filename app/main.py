@@ -1,12 +1,17 @@
 """FastAPI application entrypoint and routes for AI Document Assistant."""
 
+import io
 import os
+import zipfile
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated
 
+from docx import Document as DocxDocument
 from fastapi import Depends, FastAPI, File, HTTPException, UploadFile, status
+from pypdf import PdfReader
+from pypdf.errors import PdfReadError
 from sqlmodel import Session, select
 
 from app.db import get_session, init_db
@@ -45,6 +50,93 @@ app = FastAPI(
 )
 
 
+def validate_file_content(content: bytes, extension: str) -> None:
+    """Validate content is not empty, whitespace-only, blank, or corrupted."""
+    if not content or not content.strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="The uploaded file is empty or contains only whitespace.",
+        )
+
+    # 1. Plain text validation (.txt)
+    if extension == ".txt":
+        try:
+            text = content.decode("utf-8").strip()
+            if not text:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="The uploaded file is empty or contains only whitespace.",
+                )
+        except UnicodeDecodeError:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Corrupted file: unable to decode text file contents.",
+            )
+
+    # 2. PDF validation via pypdf (.pdf)
+    elif extension == ".pdf":
+        try:
+            pdf = PdfReader(io.BytesIO(content))
+            if len(pdf.pages) == 0:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="The uploaded PDF contains no extractable text.",
+                )
+            has_text = any((page.extract_text() or "").strip() for page in pdf.pages)
+            has_images = any(len(page.images) > 0 for page in pdf.pages)
+        except (PdfReadError, EOFError):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="The uploaded PDF is invalid or unreadable.",
+            )
+        except HTTPException:
+            raise
+        except Exception:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="The uploaded PDF is invalid or unreadable.",
+            )
+
+        if not has_text and not has_images:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="The uploaded PDF contains no extractable text.",
+            )
+
+    # 3. Word document validation (.docx)
+    elif extension == ".docx":
+        try:
+            doc_file = io.BytesIO(content)
+            if not zipfile.is_zipfile(doc_file):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Corrupted file: invalid or unreadable DOCX structure.",
+                )
+            doc = DocxDocument(doc_file)
+            paragraphs_text = "".join(p.text for p in doc.paragraphs).strip()
+            tables_text = "".join(
+                cell.text
+                for table in doc.tables
+                for row in table.rows
+                for cell in row.cells
+            ).strip()
+            total_text = paragraphs_text + tables_text
+            has_shapes = len(doc.inline_shapes) > 0
+
+            if not total_text and not has_shapes:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="The uploaded DOCX contains no extractable text.",
+                )
+        except HTTPException:
+            raise
+        except Exception:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Corrupted file: unable to read DOCX document.",
+            )
+
+
 @app.get(
     "/health",
     response_model=HealthResponse,
@@ -68,7 +160,8 @@ async def health_check() -> HealthResponse:
         "Validates file type and size, storing metadata in PostgreSQL."
     ),
     responses={
-        400: {"model": ErrorResponse, "description": "Empty file provided"},
+        400: {"model": ErrorResponse, "description": "Empty or corrupted file"},
+        409: {"model": ErrorResponse, "description": "Duplicate filename"},
         413: {"model": ErrorResponse, "description": "File exceeds 10 MB maximum size"},
         415: {"model": ErrorResponse, "description": "Unsupported file extension"},
     },
@@ -105,8 +198,9 @@ async def upload_document(
             ),
         )
 
-    # 3. Stream content in chunks to measure size without buffering into memory
+    # 3. Stream content in chunks to measure size without buffering huge payloads
     size_bytes = 0
+    buffer = io.BytesIO()
     while chunk := await file.read(CHUNK_SIZE_BYTES):
         size_bytes += len(chunk)
         if size_bytes > MAX_FILE_SIZE_BYTES:
@@ -117,18 +211,27 @@ async def upload_document(
                     f"Maximum allowed size is 10 MB ({MAX_FILE_SIZE_BYTES} bytes)."
                 ),
             )
+        buffer.write(chunk)
 
-    # 4. Validate non-empty file
-    if size_bytes == 0:
+    content = buffer.getvalue()
+
+    # 4. Content validation (catches empty, whitespace, blank & corrupt docs)
+    validate_file_content(content=content, extension=extension)
+
+    # 5. Duplicate filename check (returns 409 Conflict if file already exists)
+    existing_document = session.exec(
+        select(Document).where(Document.filename == filename)
+    ).first()
+    if existing_document:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Empty file. Uploaded file contains no data.",
+            status_code=status.HTTP_409_CONFLICT,
+            detail="A document with this filename already exists.",
         )
 
-    # 5. Extract content type with fallback
+    # 6. Extract content type with fallback
     content_type = file.content_type or "application/octet-stream"
 
-    # 6. Create and persist Document model to database
+    # 7. Create and persist Document model to database
     doc_record = Document(
         filename=filename,
         content_type=content_type,

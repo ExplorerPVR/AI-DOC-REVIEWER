@@ -1,7 +1,7 @@
 # AI Document Assistant (`ai-doc-assistant`)
 [![CI](https://github.com/ExplorerPVR/AI-DOC-REVIEWER/actions/workflows/ci.yml/badge.svg)](https://github.com/ExplorerPVR/AI-DOC-REVIEWER/actions/workflows/ci.yml)
 
-A production-ready asynchronous FastAPI service for ingesting, validating, and cataloging documents (`.pdf`, `.txt`, `.docx`). Features **PostgreSQL persistence via SQLModel**, full **Docker container orchestration**, and **Automated CI with GitHub Actions**.
+A production-ready asynchronous FastAPI service for ingesting, validating, and cataloging documents (`.pdf`, `.txt`, `.docx`). Features **PostgreSQL persistence via SQLModel**, full **Docker container orchestration**, **Automated CI with GitHub Actions**, and **Deep Document Content Validation**.
 
 ---
 
@@ -11,6 +11,10 @@ A production-ready asynchronous FastAPI service for ingesting, validating, and c
   - Automatically runs on every push and pull request.
   - Enforces code quality and formatting via `ruff check .`.
   - Runs the full test suite via `pytest`.
+- **Deep Document Content Validation**:
+  - Validates document integrity beyond file size and extension.
+  - Rejects blank PDFs (>0 bytes with no text or images), blank DOCX files (>0 bytes with no text or shapes), and whitespace-only text files.
+  - Rejects malformed or corrupted files with clear `400 Bad Request` responses before saving.
 - **PostgreSQL Database with SQLModel**:
   - `Document` database table storing:
     - `id`: Unique UUID primary key.
@@ -39,10 +43,11 @@ ai-doc-assistant/
 │   ├── __init__.py
 │   ├── db.py                # Database engine, session generator & retry initialization
 │   ├── main.py              # FastAPI app, lifespan, route handlers & validation
-│   └── models.py            # SQLModel table model & Pydantic response schemas
+│   ├── models.py            # SQLModel table model & Pydantic response schemas
+│   └── validator.py         # Content integrity & blank/corrupted file detection
 ├── tests/
 │   ├── __init__.py
-│   └── test_documents.py    # 8 automated tests with in-memory SQLite fixture
+│   └── test_documents.py    # 13 automated tests with in-memory SQLite fixture
 ├── .dockerignore            # Excludes caches, .venv, .git, and .env from Docker context
 ├── .env                     # Local environment & DB credentials (gitignored)
 ├── .env.example             # Template environment variables (committed)
@@ -120,7 +125,7 @@ curl -X GET "http://127.0.0.1:8000/health"
 ---
 
 ### 2. Upload Document
-Uploads a document (`.pdf`, `.txt`, `.docx`), validates type and size, and persists metadata in PostgreSQL.
+Uploads a document (`.pdf`, `.txt`, `.docx`), validates content integrity and size, and persists metadata in PostgreSQL.
 
 - **URL**: `POST /documents`
 - **Content-Type**: `multipart/form-data`
@@ -147,6 +152,24 @@ curl -X POST "http://127.0.0.1:8000/documents" \
   ```json
   {
     "detail": "Empty file. Uploaded file contains no data."
+  }
+  ```
+- **Blank Document (`400 Bad Request`)**:
+  ```json
+  {
+    "detail": "Blank document. PDF has no readable text or visual content."
+  }
+  ```
+  or
+  ```json
+  {
+    "detail": "Blank document. File contains only whitespace characters."
+  }
+  ```
+- **Corrupted Document (`400 Bad Request`)**:
+  ```json
+  {
+    "detail": "Corrupted or invalid file. Unable to parse PDF document."
   }
   ```
 - **Wrong File Type (`415 Unsupported Media Type`)**:
@@ -195,7 +218,7 @@ The CI pipeline runs automatically on all pushes and pull requests via GitHub Ac
 
 ### Workflow Steps:
 1. **Lint & Code Style**: Runs `uv run ruff check .` to check for style violations, unformatted imports, and common programming errors.
-2. **Automated Testing**: Runs `uv run pytest` to execute the full unit and integration test suite against the in-memory SQLite database.
+2. **Automated Testing**: Runs `uv run pytest` to execute the full unit and integration test suite (13 automated tests) against the in-memory SQLite database.
 
 ### Running CI Checks Locally:
 ```bash
