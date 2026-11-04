@@ -1,5 +1,6 @@
 """Model token pricing and cost calculation for supported LLM providers."""
 
+import os
 from dataclasses import dataclass
 
 
@@ -15,19 +16,31 @@ class ModelPrice:
 # Free calls still carry a price on paper based on published provider rates.
 MODEL_PRICING: dict[str, ModelPrice] = {
     # Google Gemini Models (source: ai.google.dev/pricing)
-    "gemini-1.5-flash": ModelPrice(
-        input_price_per_million=0.075,
-        output_price_per_million=0.30,
+    "gemini-flash-latest": ModelPrice(
+        input_price_per_million=0.10,
+        output_price_per_million=0.40,
+    ),
+    "gemini-2.5-flash": ModelPrice(
+        input_price_per_million=0.10,
+        output_price_per_million=0.40,
     ),
     "gemini-2.0-flash": ModelPrice(
         input_price_per_million=0.10,
         output_price_per_million=0.40,
+    ),
+    "gemini-1.5-flash": ModelPrice(
+        input_price_per_million=0.075,
+        output_price_per_million=0.30,
     ),
     "gemini-1.5-pro": ModelPrice(
         input_price_per_million=1.25,
         output_price_per_million=5.00,
     ),
     # Groq Cloud Models (source: groq.com/pricing)
+    "qwen/qwen3.8-27b": ModelPrice(
+        input_price_per_million=0.20,
+        output_price_per_million=0.20,
+    ),
     "llama-3.3-70b-versatile": ModelPrice(
         input_price_per_million=0.59,
         output_price_per_million=0.79,
@@ -47,11 +60,11 @@ MODEL_PRICING: dict[str, ModelPrice] = {
     ),
 }
 
-# Default models per provider
+# Default models per provider (can be overridden via environment variable)
 DEFAULT_MODELS: dict[str, str] = {
-    "gemini": "gemini-1.5-flash",
-    "groq": "llama-3.3-70b-versatile",
-    "ollama": "llama3",
+    "gemini": os.getenv("GEMINI_MODEL", "gemini-flash-latest"),
+    "groq": os.getenv("GROQ_MODEL", "qwen/qwen3.8-27b"),
+    "ollama": os.getenv("OLLAMA_MODEL", "llama3"),
 }
 
 

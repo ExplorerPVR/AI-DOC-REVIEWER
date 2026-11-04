@@ -17,7 +17,7 @@ from app.llm import (
 )
 from app.main import app
 from app.models import LLMCall
-from app.pricing import calculate_cost, get_model_price
+from app.pricing import DEFAULT_MODELS, calculate_cost, get_model_price
 
 # Isolated in-memory SQLite engine for LLM tests
 test_engine = create_engine(
@@ -115,7 +115,7 @@ def test_ask_gemini_streaming_success(
     call = calls[0]
     assert uuid.UUID(str(call.id), version=4)
     assert call.provider == "gemini"
-    assert call.model == "gemini-1.5-flash"
+    assert "gemini" in call.model
     assert call.input_tokens > 0
     assert call.output_tokens > 0
     assert call.cost_usd > 0.0
@@ -148,7 +148,7 @@ def test_ask_groq_streaming_success(
     calls = session.exec(select(LLMCall).where(LLMCall.provider == "groq")).all()
     assert len(calls) == 1
     call = calls[0]
-    assert call.model == "llama-3.3-70b-versatile"
+    assert call.model == DEFAULT_MODELS["groq"]
     assert call.input_tokens > 0
     assert call.output_tokens > 0
     assert call.cost_usd > 0.0

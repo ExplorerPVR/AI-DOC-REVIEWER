@@ -138,7 +138,7 @@ def _stream_gemini(
     timeout: float = DEFAULT_TIMEOUT_SECONDS,
 ) -> Iterator[str]:
     """Stream text completion chunks from Google Gemini."""
-    api_key = os.getenv("GEMINI_API_KEY")
+    api_key = (os.getenv("GEMINI_API_KEY") or "").strip("'\" ")
     if not api_key:
         raise LLMError("GEMINI_API_KEY is not configured", status_code=503)
 
@@ -173,7 +173,7 @@ def _stream_groq(
     timeout: float = DEFAULT_TIMEOUT_SECONDS,
 ) -> Iterator[str]:
     """Stream text completion chunks from Groq Cloud."""
-    api_key = os.getenv("GROQ_API_KEY")
+    api_key = (os.getenv("GROQ_API_KEY") or "").strip("'\" ")
     if not api_key:
         raise LLMError("GROQ_API_KEY is not configured", status_code=503)
 
