@@ -17,11 +17,15 @@ COPY pyproject.toml uv.lock ./
 # Install production dependencies without dev tooling
 RUN uv sync --frozen --no-dev
 
+# Copy database migration files
+COPY alembic.ini ./
+COPY migrations ./migrations
+
 # Copy application source code
 COPY app ./app
 
 # Expose port for FastAPI application
 EXPOSE 8000
 
-# Start Uvicorn ASGI server
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Apply migrations on container startup then start Uvicorn server
+CMD ["sh", "-c", "alembic upgrade head && exec uvicorn app.main:app --host 0.0.0.0 --port 8000"]

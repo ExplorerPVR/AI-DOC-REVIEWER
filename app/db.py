@@ -1,12 +1,10 @@
-"""Database engine, session management, and table initialization."""
+"""Database engine and session management for AI Document Assistant."""
 
 import os
-import time
 from collections.abc import Generator
 
 from dotenv import load_dotenv
-from sqlalchemy.exc import OperationalError
-from sqlmodel import Session, SQLModel, create_engine
+from sqlmodel import Session, create_engine
 
 # Load environment variables from .env file if available
 load_dotenv()
@@ -26,19 +24,6 @@ engine = create_engine(
     echo=False,
     pool_pre_ping=True,
 )
-
-
-def init_db(engine_override=None, retries: int = 5, delay: float = 2.0) -> None:
-    """Initialize database tables with connection retry logic for Docker startup."""
-    target_engine = engine_override or engine
-    for attempt in range(1, retries + 1):
-        try:
-            SQLModel.metadata.create_all(target_engine)
-            return
-        except OperationalError:
-            if attempt == retries:
-                raise
-            time.sleep(delay)
 
 
 def get_session() -> Generator[Session, None, None]:

@@ -15,6 +15,10 @@ A production-ready asynchronous FastAPI service for ingesting, validating, and c
   - Validates document integrity beyond file size and extension.
   - Rejects blank PDFs (>0 bytes with no text or images), blank DOCX files (>0 bytes with no text or shapes), and whitespace-only text files.
   - Rejects malformed or corrupted files with clear `400 Bad Request` responses before saving.
+- **Database Schema Migrations via Alembic**:
+  - Full version-controlled database schema management using Alembic.
+  - Automatically runs `alembic upgrade head` on container startup before FastAPI initializes.
+  - Zero `create_all()` in application code; schema changes are managed via reversible migration files.
 - **PostgreSQL Database with SQLModel**:
   - `Document` database table storing:
     - `id`: Unique UUID primary key.
@@ -41,13 +45,19 @@ ai-doc-assistant/
 │       └── ci.yml           # Automated CI pipeline (Ruff lint check & Pytest suite)
 ├── app/
 │   ├── __init__.py
-│   ├── db.py                # Database engine, session generator & retry initialization
-│   ├── main.py              # FastAPI app, lifespan, route handlers & validation
-│   ├── models.py            # SQLModel table model & Pydantic response schemas
-│   └── validator.py         # Content integrity & blank/corrupted file detection
+│   ├── db.py                # Database engine & session generator
+│   ├── main.py              # FastAPI app, route handlers & validation
+│   └── models.py            # SQLModel table model & Pydantic response schemas
+├── migrations/              # Alembic database migration scripts & versions
+│   ├── versions/
+│   │   └── bb20b80bdc64_create_document_table.py
+│   ├── env.py               # Alembic environment config (reads DATABASE_URL)
+│   ├── README
+│   └── script.py.mako
 ├── tests/
 │   ├── __init__.py
-│   └── test_documents.py    # 13 automated tests with in-memory SQLite fixture
+│   └── test_documents.py    # 14 automated tests with in-memory SQLite fixture
+├── alembic.ini              # Alembic CLI configuration file
 ├── .dockerignore            # Excludes caches, .venv, .git, and .env from Docker context
 ├── .env                     # Local environment & DB credentials (gitignored)
 ├── .env.example             # Template environment variables (committed)
@@ -104,6 +114,28 @@ docker compose up -d
 curl -X GET "http://127.0.0.1:8000/documents"
 ```
 The uploaded document metadata remains intact because the `postgres_data` volume preserves the PostgreSQL database across container lifecycles.
+
+---
+
+## 🗄️ Database Migrations with Alembic
+
+Database schema evolution is managed via **Alembic**. Table creation is handled exclusively via migration scripts rather than `create_all()`.
+
+```bash
+# Apply all pending migrations to head
+uv run alembic upgrade head
+
+# Roll back the most recent migration
+uv run alembic downgrade -1
+
+# Inspect the current database schema revision
+uv run alembic current
+
+# Generate a new migration after updating SQLModel models
+uv run alembic revision --autogenerate -m "describe schema change"
+```
+
+When running under Docker Compose, the container automatically applies `alembic upgrade head` upon startup before launching Uvicorn.
 
 ---
 
@@ -218,7 +250,7 @@ The CI pipeline runs automatically on all pushes and pull requests via GitHub Ac
 
 ### Workflow Steps:
 1. **Lint & Code Style**: Runs `uv run ruff check .` to check for style violations, unformatted imports, and common programming errors.
-2. **Automated Testing**: Runs `uv run pytest` to execute the full unit and integration test suite (13 automated tests) against the in-memory SQLite database.
+2. **Automated Testing**: Runs `uv run pytest` to execute the full unit and integration test suite (14 automated tests) against the in-memory SQLite database.
 
 ### Running CI Checks Locally:
 ```bash
