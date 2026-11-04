@@ -7,7 +7,7 @@ from sqlalchemy import engine_from_config, pool
 from sqlmodel import SQLModel
 
 # Import all SQLModel database models so metadata is populated
-from app.models import Document  # noqa: F401
+from app.models import Document, LLMCall  # noqa: F401
 
 # Load environment variables from .env if present
 load_dotenv()

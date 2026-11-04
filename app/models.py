@@ -63,6 +63,80 @@ class DocumentResponse(DocumentBase):
     )
 
 
+class LLMCallBase(SQLModel):
+    """Base schema holding metadata for tracked LLM generations."""
+
+    provider: str = SQLModelField(
+        index=True,
+        description="LLM provider name (e.g. gemini, groq, ollama)",
+    )
+    model: str = SQLModelField(
+        description="Exact model identifier used for generation",
+    )
+    prompt: str | None = SQLModelField(
+        default=None,
+        description="Input prompt or question asked",
+    )
+    input_tokens: int = SQLModelField(
+        default=0,
+        description="Estimated or measured input/prompt token count",
+    )
+    output_tokens: int = SQLModelField(
+        default=0,
+        description="Estimated or measured output/completion token count",
+    )
+    time_taken_seconds: float = SQLModelField(
+        description="Execution duration for the generation in seconds",
+    )
+    cost_usd: float = SQLModelField(
+        default=0.0,
+        description="Calculated cost in USD at published paid list price",
+    )
+
+
+class LLMCall(LLMCallBase, table=True):
+    """SQLModel database table model for persisting LLM call metrics and costs."""
+
+    __tablename__ = "llm_calls"
+
+    id: UUID = SQLModelField(
+        default_factory=uuid4,
+        primary_key=True,
+        index=True,
+        description="Unique UUID primary key for the LLM call record",
+    )
+    created_at: datetime = SQLModelField(
+        default_factory=lambda: datetime.now(timezone.utc),
+        description="Timestamp in UTC when the LLM call occurred",
+    )
+
+
+class LLMCallResponse(LLMCallBase):
+    """Response schema returned for LLM call records."""
+
+    id: UUID = SQLModelField(
+        description="Unique UUID identifier for the call record",
+    )
+    created_at: datetime = SQLModelField(
+        description="Timestamp in UTC recording when the call occurred",
+    )
+
+
+class AskRequest(BaseModel):
+    """Request payload schema for the POST /ask endpoint."""
+
+    question: str = PydanticField(
+        min_length=1,
+        description="Question or prompt to submit to the LLM",
+        examples=["Explain what a database index does in 2 sentences."],
+    )
+    provider: str = PydanticField(
+        default="gemini",
+        description="Target LLM provider (gemini, groq, or ollama)",
+        examples=["gemini"],
+    )
+
+
 class ErrorResponse(BaseModel):
     """Standard schema returned for client or validation errors."""
 

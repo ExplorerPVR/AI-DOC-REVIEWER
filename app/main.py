@@ -1,24 +1,38 @@
 """FastAPI application entrypoint and routes for AI Document Assistant."""
 
 import io
+import logging
 import os
 import zipfile
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Annotated
 
 from docx import Document as DocxDocument
 from fastapi import Depends, FastAPI, File, HTTPException, UploadFile, status
+from fastapi.responses import StreamingResponse
 from pypdf import PdfReader
 from pypdf.errors import PdfReadError
 from sqlmodel import Session, select
 
 from app.db import get_session
+from app.llm import (
+    LLMError,
+    LLMRateLimitError,
+    LLMServerError,
+    LLMTimeoutError,
+    generate,
+)
 from app.models import (
+    AskRequest,
     Document,
     DocumentResponse,
     ErrorResponse,
     HealthResponse,
 )
+from app.pricing import DEFAULT_MODELS
+
+logger = logging.getLogger(__name__)
 
 # Constants for document upload validation
 MAX_FILE_SIZE_BYTES: int = int(
@@ -30,10 +44,10 @@ ALLOWED_EXTENSIONS: set[str] = {".pdf", ".txt", ".docx"}
 app = FastAPI(
     title="AI Document Assistant",
     description=(
-        "FastAPI service for ingesting and cataloging documents (.pdf, .txt, .docx). "
-        "Provides PostgreSQL-backed persistence and containerized deployment."
+        "FastAPI service for ingesting documents (.pdf, .txt, .docx), "
+        "LLM streaming responses, and PostgreSQL persistence."
     ),
-    version="0.2.0",
+    version="0.3.0",
     docs_url="/docs",
     redoc_url="/redoc",
 )
@@ -248,3 +262,87 @@ async def list_documents(
     statement = select(Document).order_by(Document.uploaded_at)
     documents = session.exec(statement).all()
     return list(documents)
+
+
+@app.post(
+    "/ask",
+    summary="Ask an LLM",
+    description=(
+        "Stream completion answers from configured LLM providers "
+        "(gemini, groq, ollama) with automatic retries and cost logging."
+    ),
+    responses={
+        200: {
+            "description": "Streamed text response chunks from the LLM provider",
+            "content": {"text/plain": {}},
+        },
+        400: {"model": ErrorResponse, "description": "Invalid question or provider"},
+        503: {
+            "model": ErrorResponse,
+            "description": "LLM provider unavailable or rate-limited",
+        },
+        504: {
+            "model": ErrorResponse,
+            "description": "LLM provider request timed out",
+        },
+    },
+    tags=["LLM"],
+)
+async def ask_llm(
+    request: AskRequest,
+    session: Annotated[Session, Depends(get_session)],
+) -> StreamingResponse:
+    """Stream response from selected LLM provider and persist call metrics."""
+    question = (request.question or "").strip()
+    if not question:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="The 'question' field cannot be empty.",
+        )
+
+    provider = (request.provider or "gemini").lower().strip()
+    if provider not in DEFAULT_MODELS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"Unsupported LLM provider '{provider}'. "
+                f"Allowed providers: {', '.join(sorted(DEFAULT_MODELS.keys()))}"
+            ),
+        )
+
+    try:
+        gen = generate(prompt=question, provider=provider, session=session)
+        # Trigger connection & retry loop before sending 200 header
+        first_chunk = next(gen, None)
+    except LLMTimeoutError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            detail=f"LLM provider request timed out: {exc.message}",
+        ) from exc
+    except (LLMRateLimitError, LLMServerError, LLMError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"LLM provider service unavailable: {exc.message}",
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Unexpected error communicating with LLM: {exc}",
+        ) from exc
+
+    def stream_content() -> Iterator[str]:
+        if first_chunk:
+            yield first_chunk
+        try:
+            for chunk in gen:
+                if chunk:
+                    yield chunk
+        except Exception as err:
+            logger.error("Error during streaming generation: %s", err)
+
+    return StreamingResponse(stream_content(), media_type="text/plain")

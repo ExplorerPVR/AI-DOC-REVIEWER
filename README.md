@@ -15,6 +15,12 @@ A production-ready asynchronous FastAPI service for ingesting, validating, and c
   - Validates document integrity beyond file size and extension.
   - Rejects blank PDFs (>0 bytes with no text or images), blank DOCX files (>0 bytes with no text or shapes), and whitespace-only text files.
   - Rejects malformed or corrupted files with clear `400 Bad Request` responses before saving.
+- **Production LLM Streaming & Cost Tracking (`POST /ask`)**:
+  - Multi-provider support: Google Gemini, Groq Cloud, and local Ollama.
+  - Asynchronous chunk-by-chunk response streaming (`StreamingResponse`).
+  - Automatic retries with exponential backoff on rate limits (429) and server errors (5xx).
+  - 30-second call timeouts with clear `504 Gateway Timeout` and `503 Service Unavailable` error responses.
+  - Automatically records tokens, execution duration, and USD cost at published list price into the `llm_calls` PostgreSQL table.
 - **Database Schema Migrations via Alembic**:
   - Full version-controlled database schema management using Alembic.
   - Automatically runs `alembic upgrade head` on container startup before FastAPI initializes.
@@ -46,16 +52,20 @@ ai-doc-assistant/
 ├── app/
 │   ├── __init__.py
 │   ├── db.py                # Database engine & session generator
+│   ├── llm.py               # Multi-provider streaming, retries, and token tracking
 │   ├── main.py              # FastAPI app, route handlers & validation
-│   └── models.py            # SQLModel table model & Pydantic response schemas
+│   ├── models.py            # SQLModel table models (Document, LLMCall) & schemas
+│   └── pricing.py           # Model pricing per million tokens & cost calculator
 ├── migrations/              # Alembic database migration scripts & versions
 │   ├── versions/
-│   │   └── bb20b80bdc64_create_document_table.py
+│   │   ├── bb20b80bdc64_create_document_table.py
+│   │   └── 43ce2c5fbd08_create_llm_calls_table.py
 │   ├── env.py               # Alembic environment config (reads DATABASE_URL)
 │   ├── README
 │   └── script.py.mako
 ├── tests/
 │   ├── __init__.py
+│   ├── test_ask.py          # 9 automated tests for LLM streaming, retries, and costs
 │   └── test_documents.py    # 14 automated tests with in-memory SQLite fixture
 ├── alembic.ini              # Alembic CLI configuration file
 ├── .dockerignore            # Excludes caches, .venv, .git, and .env from Docker context
@@ -244,13 +254,46 @@ curl -X GET "http://127.0.0.1:8000/documents"
 
 ---
 
+---
+
+### 4. Ask an LLM (Streaming Completion)
+Streams answers from configured LLM providers (Gemini, Groq, Ollama) with automatic retries, timeouts, and call cost logging.
+
+- **URL**: `POST /ask`
+- **Content-Type**: `application/json`
+- **Transfer-Encoding**: `chunked` (text/plain streaming)
+
+```bash
+# Ask Gemini (default)
+curl -N -X POST "http://127.0.0.1:8000/ask" \
+  -H "Content-Type: application/json" \
+  -d '{"question": "What is the difference between SQL and NoSQL in two sentences?", "provider": "gemini"}'
+
+# Ask Groq
+curl -N -X POST "http://127.0.0.1:8000/ask" \
+  -H "Content-Type: application/json" \
+  -d '{"question": "Explain Docker containers briefly.", "provider": "groq"}'
+
+# Ask Local Ollama
+curl -N -X POST "http://127.0.0.1:8000/ask" \
+  -H "Content-Type: application/json" \
+  -d '{"question": "Hello from local LLM!", "provider": "ollama"}'
+```
+
+#### Error Handling:
+- **Rate Limit Exceeded (`503 Service Unavailable`)**: Returned if the LLM provider rate limits (429) persist after 3 retries with exponential backoff.
+- **Gateway Timeout (`504 Gateway Timeout`)**: Returned if generation exceeds the 30-second timeout threshold across retries.
+- **Unsupported Provider (`400 Bad Request`)**: Returned if a non-supported provider name is passed.
+
+---
+
 ## 🤖 Continuous Integration (CI) Checks
 
 The CI pipeline runs automatically on all pushes and pull requests via GitHub Actions (`.github/workflows/ci.yml`).
 
 ### Workflow Steps:
 1. **Lint & Code Style**: Runs `uv run ruff check .` to check for style violations, unformatted imports, and common programming errors.
-2. **Automated Testing**: Runs `uv run pytest` to execute the full unit and integration test suite (14 automated tests) against the in-memory SQLite database.
+2. **Automated Testing**: Runs `uv run pytest` to execute the full unit and integration test suite (23 automated tests) against the in-memory SQLite database.
 
 ### Running CI Checks Locally:
 ```bash
