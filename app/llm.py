@@ -220,6 +220,14 @@ def _stream_ollama(
 ) -> Iterator[str]:
     """Stream text completion chunks from local Ollama service."""
     base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/")
+    if os.path.exists("/.dockerenv") and (
+        "localhost" in base_url or "127.0.0.1" in base_url
+    ):
+        base_url = (
+            base_url.replace("localhost", "host.docker.internal").replace(
+                "127.0.0.1", "host.docker.internal"
+            )
+        )
     url = f"{base_url}/api/generate"
 
     try:
