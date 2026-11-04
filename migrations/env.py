@@ -20,10 +20,12 @@ if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
 # Read database URL from DATABASE_URL environment variable (not from alembic.ini)
-database_url = os.getenv(
-    "DATABASE_URL",
-    "postgresql://postgres:postgres@localhost:5432/doc_assistant",
-)
+database_url = os.getenv("DATABASE_URL")
+if not database_url:
+    raise ValueError(
+        "DATABASE_URL environment variable is not set. "
+        "Please provide DATABASE_URL in your environment or .env file."
+    )
 config.set_main_option("sqlalchemy.url", database_url)
 
 # Set target metadata to SQLModel.metadata
