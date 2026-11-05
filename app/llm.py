@@ -151,7 +151,11 @@ def _stream_gemini(
         from google import genai
         from google.genai import errors as genai_errors
 
-        client = genai.Client(api_key=api_key)
+        timeout_ms = int(timeout * 1000) if timeout else None
+        client = genai.Client(
+            api_key=api_key,
+            http_options={"timeout": timeout_ms} if timeout_ms else None,
+        )
         response = client.models.generate_content_stream(
             model=model,
             contents=prompt,

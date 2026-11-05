@@ -351,3 +351,33 @@ def test_ask_ollama_real_usage_logging(
     assert len(calls) == 1
     assert calls[0].input_tokens == 15
     assert calls[0].output_tokens == 30
+
+
+def test_stream_gemini_passes_timeout(monkeypatch: pytest.MonkeyPatch):
+    """Test 11: _stream_gemini passes timeout in milliseconds to genai.Client."""
+    import google.genai
+
+    captured_options = {}
+
+    class MockModels:
+        def generate_content_stream(self, model, contents):
+            return iter([])
+
+    class MockGenaiClient:
+        def __init__(self, api_key=None, http_options=None):
+            captured_options["api_key"] = api_key
+            captured_options["http_options"] = http_options
+            self.models = MockModels()
+
+    monkeypatch.setenv("GEMINI_API_KEY", "test-gemini-key")
+    monkeypatch.setattr(google.genai, "Client", MockGenaiClient)
+
+    list(
+        llm_module._stream_gemini(
+            prompt="Hello",
+            model="gemini-1.5-flash",
+            timeout=25.0,
+        )
+    )
+    assert captured_options["http_options"] == {"timeout": 25000}
+    assert captured_options["api_key"] == "test-gemini-key"
