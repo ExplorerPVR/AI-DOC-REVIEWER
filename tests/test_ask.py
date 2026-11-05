@@ -252,3 +252,102 @@ def test_ask_unsupported_provider_rejected(client: TestClient):
     response = client.post("/ask", json=payload)
     assert response.status_code == 400
     assert "Unsupported LLM provider" in response.json()["detail"]
+
+
+def test_ask_gemini_real_usage_logging(
+    client: TestClient,
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Test 8: Real Gemini usage metadata is logged instead of estimate."""
+    def mock_gemini_with_usage(
+        prompt: str,
+        model: str,
+        timeout: float = 30.0,
+        usage: dict[str, int] | None = None,
+    ) -> Iterator[str]:
+        if usage is not None:
+            usage["input_tokens"] = 42
+            usage["output_tokens"] = 84
+        yield "Gemini exact token answer."
+
+    monkeypatch.setattr(llm_module, "_stream_gemini", mock_gemini_with_usage)
+
+    response = client.post(
+        "/ask",
+        json={"question": "Test gemini tokens", "provider": "gemini"},
+    )
+    assert response.status_code == 200
+
+    calls = session.exec(
+        select(LLMCall).where(LLMCall.prompt == "Test gemini tokens")
+    ).all()
+    assert len(calls) == 1
+    assert calls[0].input_tokens == 42
+    assert calls[0].output_tokens == 84
+
+
+def test_ask_groq_real_usage_logging(
+    client: TestClient,
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Test 9: Groq include_usage stream tokens are logged in LLMCall."""
+    def mock_groq_with_usage(
+        prompt: str,
+        model: str,
+        timeout: float = 30.0,
+        usage: dict[str, int] | None = None,
+    ) -> Iterator[str]:
+        if usage is not None:
+            usage["input_tokens"] = 55
+            usage["output_tokens"] = 110
+        yield "Groq exact token answer."
+
+    monkeypatch.setattr(llm_module, "_stream_groq", mock_groq_with_usage)
+
+    response = client.post(
+        "/ask",
+        json={"question": "Test groq tokens", "provider": "groq"},
+    )
+    assert response.status_code == 200
+
+    calls = session.exec(
+        select(LLMCall).where(LLMCall.prompt == "Test groq tokens")
+    ).all()
+    assert len(calls) == 1
+    assert calls[0].input_tokens == 55
+    assert calls[0].output_tokens == 110
+
+
+def test_ask_ollama_real_usage_logging(
+    client: TestClient,
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Test 10: Ollama prompt_eval_count and eval_count are captured in LLMCall."""
+    def mock_ollama_with_usage(
+        prompt: str,
+        model: str,
+        timeout: float = 30.0,
+        usage: dict[str, int] | None = None,
+    ) -> Iterator[str]:
+        if usage is not None:
+            usage["input_tokens"] = 15
+            usage["output_tokens"] = 30
+        yield "Ollama exact tokens."
+
+    monkeypatch.setattr(llm_module, "_stream_ollama", mock_ollama_with_usage)
+
+    response = client.post(
+        "/ask",
+        json={"question": "Test ollama tokens", "provider": "ollama"},
+    )
+    assert response.status_code == 200
+
+    calls = session.exec(
+        select(LLMCall).where(LLMCall.prompt == "Test ollama tokens")
+    ).all()
+    assert len(calls) == 1
+    assert calls[0].input_tokens == 15
+    assert calls[0].output_tokens == 30

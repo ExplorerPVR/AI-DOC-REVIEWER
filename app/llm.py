@@ -1,5 +1,6 @@
 """LLM module for multi-provider streaming, retries, and cost tracking."""
 
+import inspect
 import json
 import logging
 import os
@@ -124,7 +125,10 @@ def retry(
 
 
 def estimate_tokens(text: str) -> int:
-    """Estimate token count for text using standard ~4 chars/token heuristic."""
+    """Estimate token count for text using standard ~4 chars/token heuristic.
+
+    Used as a fallback when provider usage metadata is unavailable.
+    """
     if not text:
         return 0
     char_estimate = (len(text) + 3) // 4
@@ -136,6 +140,7 @@ def _stream_gemini(
     prompt: str,
     model: str,
     timeout: float = DEFAULT_TIMEOUT_SECONDS,
+    usage: dict[str, int] | None = None,
 ) -> Iterator[str]:
     """Stream text completion chunks from Google Gemini."""
     api_key = (os.getenv("GEMINI_API_KEY") or "").strip("'\" ")
@@ -152,8 +157,33 @@ def _stream_gemini(
             contents=prompt,
         )
         for chunk in response:
+            if (
+                usage is not None
+                and hasattr(chunk, "usage_metadata")
+                and chunk.usage_metadata
+            ):
+                meta = chunk.usage_metadata
+                prompt_tokens = getattr(meta, "prompt_token_count", None)
+                if prompt_tokens is not None:
+                    usage["input_tokens"] = prompt_tokens
+                cand_tokens = getattr(meta, "candidates_token_count", None)
+                if cand_tokens is not None:
+                    usage["output_tokens"] = cand_tokens
             if chunk.text:
                 yield chunk.text
+
+        if (
+            usage is not None
+            and hasattr(response, "usage_metadata")
+            and response.usage_metadata
+        ):
+            meta = response.usage_metadata
+            p_tokens = getattr(meta, "prompt_token_count", None)
+            c_tokens = getattr(meta, "candidates_token_count", None)
+            if "input_tokens" not in usage and p_tokens is not None:
+                usage["input_tokens"] = p_tokens
+            if "output_tokens" not in usage and c_tokens is not None:
+                usage["output_tokens"] = c_tokens
     except Exception as exc:
         err_msg = str(exc).lower()
         if "429" in err_msg or "quota" in err_msg or "resource_exhausted" in err_msg:
@@ -171,6 +201,7 @@ def _stream_groq(
     prompt: str,
     model: str,
     timeout: float = DEFAULT_TIMEOUT_SECONDS,
+    usage: dict[str, int] | None = None,
 ) -> Iterator[str]:
     """Stream text completion chunks from Groq Cloud."""
     api_key = (os.getenv("GROQ_API_KEY") or "").strip("'\" ")
@@ -191,11 +222,20 @@ def _stream_groq(
             model=model,
             messages=[{"role": "user", "content": prompt}],
             stream=True,
+            stream_options={"include_usage": True},
         )
         for chunk in completion:
-            content = chunk.choices[0].delta.content or ""
-            if content:
-                yield content
+            if usage is not None and hasattr(chunk, "usage") and chunk.usage:
+                u = chunk.usage
+                if getattr(u, "prompt_tokens", None) is not None:
+                    usage["input_tokens"] = u.prompt_tokens
+                if getattr(u, "completion_tokens", None) is not None:
+                    usage["output_tokens"] = u.completion_tokens
+            if chunk.choices and len(chunk.choices) > 0:
+                delta = chunk.choices[0].delta
+                content = getattr(delta, "content", None) or ""
+                if content:
+                    yield content
     except RateLimitError as exc:
         raise LLMRateLimitError(f"Groq rate limit exceeded: {exc}") from exc
     except APITimeoutError as exc:
@@ -217,6 +257,7 @@ def _stream_ollama(
     prompt: str,
     model: str,
     timeout: float = DEFAULT_TIMEOUT_SECONDS,
+    usage: dict[str, int] | None = None,
 ) -> Iterator[str]:
     """Stream text completion chunks from local Ollama service."""
     base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/")
@@ -248,6 +289,13 @@ def _stream_ollama(
                 for line in response.iter_lines():
                     if line:
                         payload = json.loads(line)
+                        if usage is not None:
+                            prompt_eval = payload.get("prompt_eval_count")
+                            if prompt_eval is not None:
+                                usage["input_tokens"] = int(prompt_eval)
+                            eval_cnt = payload.get("eval_count")
+                            if eval_cnt is not None:
+                                usage["output_tokens"] = int(eval_cnt)
                         chunk = payload.get("response", "")
                         if chunk:
                             yield chunk
@@ -276,15 +324,24 @@ def _call_provider_stream(
     prompt: str,
     model: str,
     timeout: float = DEFAULT_TIMEOUT_SECONDS,
+    usage: dict[str, int] | None = None,
 ) -> Iterator[str]:
     """Invoke provider-specific stream generator wrapped with automatic retries."""
-    if provider == "gemini":
-        return _stream_gemini(prompt=prompt, model=model, timeout=timeout)
-    if provider == "groq":
-        return _stream_groq(prompt=prompt, model=model, timeout=timeout)
-    if provider == "ollama":
-        return _stream_ollama(prompt=prompt, model=model, timeout=timeout)
-    raise ValueError(f"Unsupported LLM provider '{provider}'")
+    func_map = {
+        "gemini": _stream_gemini,
+        "groq": _stream_groq,
+        "ollama": _stream_ollama,
+    }
+    stream_func = func_map.get(provider)
+    if stream_func is None:
+        raise ValueError(f"Unsupported LLM provider '{provider}'")
+
+    sig = inspect.signature(stream_func)
+    if "usage" in sig.parameters or any(
+        p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+    ):
+        return stream_func(prompt=prompt, model=model, timeout=timeout, usage=usage)
+    return stream_func(prompt=prompt, model=model, timeout=timeout)
 
 
 def _record_llm_call(
@@ -315,6 +372,16 @@ def _record_llm_call(
             with Session(engine) as s:
                 s.add(call_record)
                 s.commit()
+        logger.info(
+            "LLM Call Logged: provider=%s model=%s in_tokens=%d out_tokens=%d "
+            "duration=%.4fs cost=$%.8f",
+            provider,
+            model,
+            input_tokens,
+            output_tokens,
+            time_taken_seconds,
+            cost_usd,
+        )
     except Exception as exc:
         logger.error("Failed to record LLMCall metric in database: %s", exc)
 
@@ -352,7 +419,7 @@ def generate(
 
     model = DEFAULT_MODELS[normalized_provider]
     start_time = time.perf_counter()
-    input_tokens = estimate_tokens(prompt)
+    usage: dict[str, int] = {}
     output_chunks: list[str] = []
 
     # 1. Obtain generator wrapped with retry on 429, 5xx, or timeout
@@ -361,6 +428,7 @@ def generate(
         prompt=prompt,
         model=model,
         timeout=timeout,
+        usage=usage,
     )
 
     # 2. Consume and yield stream while accumulating output metrics
@@ -373,7 +441,16 @@ def generate(
         # 3. Always compute metrics and record to database
         duration = time.perf_counter() - start_time
         full_text = "".join(output_chunks)
-        output_tokens = estimate_tokens(full_text) if full_text else 0
+
+        # Use actual token counts reported by provider; fallback to estimate_tokens
+        input_tokens = usage.get("input_tokens")
+        if input_tokens is None or input_tokens <= 0:
+            input_tokens = estimate_tokens(prompt)
+
+        output_tokens = usage.get("output_tokens")
+        if output_tokens is None:
+            output_tokens = estimate_tokens(full_text) if full_text else 0
+
         cost_usd = calculate_cost(model, input_tokens, output_tokens)
 
         _record_llm_call(
