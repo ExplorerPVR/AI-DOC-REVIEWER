@@ -1,7 +1,14 @@
 """Model token pricing and cost calculation for supported LLM providers."""
 
+import logging
 import os
 from dataclasses import dataclass
+
+logger = logging.getLogger(__name__)
+
+# Fallback baseline pricing for unlisted models ($ per 1M tokens)
+DEFAULT_BASELINE_INPUT_PRICE: float = 0.10
+DEFAULT_BASELINE_OUTPUT_PRICE: float = 0.40
 
 
 @dataclass(frozen=True)
@@ -79,8 +86,18 @@ def get_model_price(model_name: str) -> ModelPrice:
         if key in normalized_name:
             return price
 
-    # Default fallback to standard baseline price
-    return ModelPrice(input_price_per_million=0.10, output_price_per_million=0.40)
+    # Warn when pricing is unconfigured and fall back to baseline price
+    logger.warning(
+        "No pricing configured for model '%s'. Falling back to baseline price "
+        "($%.2f in / $%.2f out per million tokens).",
+        model_name,
+        DEFAULT_BASELINE_INPUT_PRICE,
+        DEFAULT_BASELINE_OUTPUT_PRICE,
+    )
+    return ModelPrice(
+        input_price_per_million=DEFAULT_BASELINE_INPUT_PRICE,
+        output_price_per_million=DEFAULT_BASELINE_OUTPUT_PRICE,
+    )
 
 
 def calculate_cost(

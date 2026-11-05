@@ -77,6 +77,17 @@ def test_pricing_calculation():
     assert free_cost == 0.0
 
 
+def test_unknown_model_pricing_warning(caplog: pytest.LogCaptureFixture):
+    """Verify get_model_price emits a warning when model pricing is unconfigured."""
+    import logging
+
+    with caplog.at_level(logging.WARNING):
+        price = get_model_price("unlisted-custom-model")
+    assert price.input_price_per_million == 0.10
+    assert price.output_price_per_million == 0.40
+    assert "No pricing configured for model 'unlisted-custom-model'" in caplog.text
+
+
 def test_estimate_tokens():
     """Verify token estimation heuristic."""
     assert estimate_tokens("") == 0
