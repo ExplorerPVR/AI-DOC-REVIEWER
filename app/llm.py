@@ -386,6 +386,19 @@ def _record_llm_call(
         time_taken_seconds=round(time_taken_seconds, 4),
         cost_usd=cost_usd,
     )
+
+    # Log metrics immediately before database persistence
+    logger.info(
+        "LLM Call: provider=%s model=%s in_tokens=%d out_tokens=%d "
+        "duration=%.4fs cost=$%.8f",
+        provider,
+        model,
+        input_tokens,
+        output_tokens,
+        time_taken_seconds,
+        cost_usd,
+    )
+
     try:
         if session is not None:
             session.add(call_record)
@@ -394,16 +407,6 @@ def _record_llm_call(
             with Session(engine) as s:
                 s.add(call_record)
                 s.commit()
-        logger.info(
-            "LLM Call Logged: provider=%s model=%s in_tokens=%d out_tokens=%d "
-            "duration=%.4fs cost=$%.8f",
-            provider,
-            model,
-            input_tokens,
-            output_tokens,
-            time_taken_seconds,
-            cost_usd,
-        )
     except Exception as exc:
         logger.error("Failed to record LLMCall metric in database: %s", exc)
 
