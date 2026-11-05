@@ -323,14 +323,19 @@ def _stream_ollama(
     backoff=2.0,
     exceptions=RETRYABLE_EXCEPTIONS,
 )
-def _call_provider_stream(
+def _start_provider_stream(
     provider: str,
     prompt: str,
     model: str,
     timeout: float = DEFAULT_TIMEOUT_SECONDS,
     usage: dict[str, int] | None = None,
-) -> Iterator[str]:
-    """Invoke provider-specific stream generator wrapped with automatic retries."""
+) -> tuple[str | None, Iterator[str]]:
+    """Start provider stream and pull the first chunk inside the retry loop.
+
+    Because Python generator functions with `yield` only execute upon iteration,
+    fetching the first chunk inside this function ensures initial connection
+    failures, rate limits (429), timeouts, and server errors trigger retries.
+    """
     func_map = {
         "gemini": _stream_gemini,
         "groq": _stream_groq,
@@ -344,8 +349,21 @@ def _call_provider_stream(
     if "usage" in sig.parameters or any(
         p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
     ):
-        return stream_func(prompt=prompt, model=model, timeout=timeout, usage=usage)
-    return stream_func(prompt=prompt, model=model, timeout=timeout)
+        stream = stream_func(prompt=prompt, model=model, timeout=timeout, usage=usage)
+    else:
+        stream = stream_func(prompt=prompt, model=model, timeout=timeout)
+
+    first_chunk: str | None = None
+    for chunk in stream:
+        if chunk:
+            first_chunk = chunk
+            break
+
+    return first_chunk, stream
+
+
+# Backward compatibility alias
+_call_provider_stream = _start_provider_stream
 
 
 def _record_llm_call(
@@ -426,8 +444,8 @@ def generate(
     usage: dict[str, int] = {}
     output_chunks: list[str] = []
 
-    # 1. Obtain generator wrapped with retry on 429, 5xx, or timeout
-    stream = _call_provider_stream(
+    # 1. Start stream and pull first chunk inside retry loop
+    first_chunk, stream = _start_provider_stream(
         provider=normalized_provider,
         prompt=prompt,
         model=model,
@@ -437,6 +455,9 @@ def generate(
 
     # 2. Consume and yield stream while accumulating output metrics
     try:
+        if first_chunk:
+            output_chunks.append(first_chunk)
+            yield first_chunk
         for chunk in stream:
             if chunk:
                 output_chunks.append(chunk)

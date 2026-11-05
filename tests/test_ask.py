@@ -199,6 +199,7 @@ def test_ask_rate_limit_429_retried_and_fails_with_503(
         nonlocal attempts
         attempts += 1
         raise LLMRateLimitError("Gemini quota exhausted (HTTP 429)")
+        yield ""
 
     monkeypatch.setattr(llm_module, "_stream_gemini", mock_stream_failing)
 
@@ -227,6 +228,7 @@ def test_ask_timeout_retried_and_fails_with_504(
         nonlocal attempts
         attempts += 1
         raise LLMTimeoutError("Groq request timed out after 30s (504)")
+        yield ""
 
     monkeypatch.setattr(llm_module, "_stream_groq", mock_stream_timeout)
 
