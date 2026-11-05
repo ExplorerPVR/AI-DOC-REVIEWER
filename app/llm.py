@@ -55,6 +55,13 @@ class LLMServerError(LLMError):
         super().__init__(message=message, status_code=503)
 
 
+class LLMDatabaseError(LLMError):
+    """Failed to persist LLMCall metric in database."""
+
+    def __init__(self, message: str = "Failed to record LLMCall in database") -> None:
+        super().__init__(message=message, status_code=500)
+
+
 # Tuple of transient errors that qualify for retry
 RETRYABLE_EXCEPTIONS: tuple[type[Exception], ...] = (
     LLMRateLimitError,
@@ -409,6 +416,14 @@ def _record_llm_call(
                 s.commit()
     except Exception as exc:
         logger.error("Failed to record LLMCall metric in database: %s", exc)
+        if session is not None:
+            try:
+                session.rollback()
+            except Exception:
+                pass
+        raise LLMDatabaseError(
+            f"Failed to record LLMCall metric in database: {exc}"
+        ) from exc
 
 
 def generate(

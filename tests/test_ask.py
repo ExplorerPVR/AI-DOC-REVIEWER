@@ -383,3 +383,26 @@ def test_stream_gemini_passes_timeout(monkeypatch: pytest.MonkeyPatch):
     )
     assert captured_options["http_options"] == {"timeout": 25000}
     assert captured_options["api_key"] == "test-gemini-key"
+
+
+def test_record_llm_call_raises_database_error():
+    """Test 12: _record_llm_call rolls back and raises LLMDatabaseError on failure."""
+    from unittest.mock import MagicMock
+
+    mock_session = MagicMock()
+    mock_session.commit.side_effect = Exception("DB disk full")
+
+    with pytest.raises(llm_module.LLMDatabaseError) as exc_info:
+        llm_module._record_llm_call(
+            provider="gemini",
+            model="gemini-1.5-flash",
+            prompt="Test DB fail",
+            input_tokens=10,
+            output_tokens=20,
+            time_taken_seconds=0.5,
+            cost_usd=0.001,
+            session=mock_session,
+        )
+
+    assert "Failed to record LLMCall metric in database" in str(exc_info.value)
+    mock_session.rollback.assert_called_once()
