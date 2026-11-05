@@ -288,7 +288,7 @@ async def list_documents(
     },
     tags=["LLM"],
 )
-async def ask_llm(
+def ask_llm(
     request: AskRequest,
     session: Annotated[Session, Depends(get_session)],
 ) -> StreamingResponse:
