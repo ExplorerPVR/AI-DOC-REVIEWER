@@ -1,0 +1,5 @@
+Carol Williams
+Phone: +1 (555) 987-6543
+Address: Chicago, IL
+Background: Cloud DevOps Engineer with extensive AWS and Kubernetes production experience.
+Key Skills: AWS, Kubernetes, Terraform, Docker, CI/CD, Linux, Bash

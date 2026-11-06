@@ -1,0 +1,5 @@
+Hassan Al-Mansoor
+Email: hassan.m@cybersec.ae
+Phone: +971 50 123 4567
+Summary: Information security analyst performing threat detection, vulnerability assessments, and incident response.
+Skills: SIEM, Wireshark, Penetration Testing, Python, Network Security, Snort

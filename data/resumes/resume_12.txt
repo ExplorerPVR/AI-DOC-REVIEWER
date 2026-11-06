@@ -1,0 +1,5 @@
+Lucas Silva
+Email: lucas.silva@mobileapps.br
+Phone: +55 11 98765-4321
+Profile: Native and cross-platform mobile app developer with 10+ published App Store apps.
+Skills: Swift, Kotlin, Flutter, iOS, Android, REST APIs

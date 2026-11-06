@@ -1,0 +1,5 @@
+Bob Smith
+Email: bob.smith@techworld.org
+Location: San Francisco, CA
+Summary: Frontend specialist creating accessible, high-performance web applications.
+Core Competencies: React, TypeScript, Next.js, Tailwind CSS, GraphQL

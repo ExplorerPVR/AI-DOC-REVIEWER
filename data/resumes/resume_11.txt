@@ -1,0 +1,5 @@
+Kavita Patel
+Email: kavita.patel@fintech.in
+Phone: +91 98765 43210
+Summary: Database administrator managing multi-terabyte transactional databases and failover clusters.
+Key Skills: PostgreSQL, Oracle, MySQL, Performance Tuning, Database Replication

@@ -16,6 +16,7 @@ from pypdf.errors import PdfReadError
 from sqlmodel import Session, select
 
 from app.db import get_session
+from app.extractor import extract_resume_data
 from app.llm import (
     LLMError,
     LLMRateLimitError,
@@ -28,7 +29,9 @@ from app.models import (
     Document,
     DocumentResponse,
     ErrorResponse,
+    ExtractRequest,
     HealthResponse,
+    ResumeData,
 )
 from app.pricing import DEFAULT_MODELS
 
@@ -346,3 +349,55 @@ def ask_llm(
             logger.error("Error during streaming generation: %s", err)
 
     return StreamingResponse(stream_content(), media_type="text/plain")
+
+
+@app.post(
+    "/extract",
+    response_model=ResumeData,
+    status_code=status.HTTP_200_OK,
+    summary="Extract Structured Resume Data",
+    description=(
+        "Extract candidate biographical details and skills into a structured JSON "
+        "ResumeData schema using provider structured outputs, with automatic retry "
+        "on schema validation failures and prompt injection defense."
+    ),
+    responses={
+        200: {
+            "model": ResumeData,
+            "description": "Validated structured resume information",
+        },
+        400: {
+            "model": ErrorResponse,
+            "description": "Invalid input or empty resume text",
+        },
+        422: {
+            "model": ErrorResponse,
+            "description": "Schema validation failed after retry",
+        },
+        503: {
+            "model": ErrorResponse,
+            "description": "LLM provider unavailable or rate-limited",
+        },
+        504: {
+            "model": ErrorResponse,
+            "description": "LLM provider request timed out",
+        },
+    },
+    tags=["Extraction"],
+)
+def extract_resume(
+    request: ExtractRequest,
+    session: Annotated[Session, Depends(get_session)],
+) -> ResumeData:
+    """Extract structured ResumeData from provided resume text."""
+    content = (request.text or request.resume_text or "").strip()
+    if not content:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="The resume 'text' field cannot be empty.",
+        )
+    return extract_resume_data(
+        resume_text=content,
+        provider=request.provider,
+        session=session,
+    )

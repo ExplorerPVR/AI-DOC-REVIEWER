@@ -1,0 +1,5 @@
+Quentin Dupont
+Email: quentin.dupont@embedded-tech.fr
+Phone: +33 1 42 68 00 00
+Background: Firmware engineer developing safety-critical automotive embedded software.
+Technical Skills: Embedded C, RTOS, CAN Bus, Microcontrollers, ARM Cortex, I2C

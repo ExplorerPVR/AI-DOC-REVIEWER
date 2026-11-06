@@ -1,9 +1,10 @@
 """SQLModel database models and Pydantic schemas for AI Document Assistant."""
 
 from datetime import datetime, timezone
+from typing import Any
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from pydantic import Field as PydanticField
 from sqlmodel import Field as SQLModelField
 from sqlmodel import SQLModel
@@ -143,4 +144,80 @@ class ErrorResponse(BaseModel):
     detail: str = PydanticField(
         description="Human-readable explanation of the validation or operational error",
         examples=["Unsupported file type '.png'. Allowed types are: .pdf, .txt, .docx"],
+    )
+
+
+class ResumeData(BaseModel):
+    """Structured resume information extracted by LLM."""
+
+    name: str | None = PydanticField(
+        default=None,
+        description="Candidate's full legal name, or null if missing from resume",
+    )
+    email: str | None = PydanticField(
+        default=None,
+        description="Candidate's contact email address, or null if missing",
+    )
+    phone: str | None = PydanticField(
+        default=None,
+        description="Candidate's phone number, or null if missing",
+    )
+    skills: list[str] = PydanticField(
+        default_factory=list,
+        description="List of candidate's technical and professional skills",
+    )
+
+    @field_validator("name", "email", "phone", mode="before")
+    @classmethod
+    def normalize_optional_fields(cls, value: Any) -> str | None:
+        """Ensure missing or placeholder values become null."""
+        if value is None:
+            return None
+        cleaned = str(value).strip()
+        if not cleaned or cleaned.lower() in {
+            "null",
+            "none",
+            "n/a",
+            "na",
+            "not provided",
+            "unknown",
+        }:
+            return None
+        return cleaned
+
+    @field_validator("skills", mode="before")
+    @classmethod
+    def normalize_skills(cls, value: Any) -> list[str]:
+        """Normalize skills into a clean list of non-empty strings."""
+        if value is None:
+            return []
+        if isinstance(value, list):
+            result = []
+            for item in value:
+                if item is not None:
+                    s = str(item).strip()
+                    if s and s not in result:
+                        result.append(s)
+            return result
+        if isinstance(value, str):
+            parts = [s.strip() for s in value.split(",") if s.strip()]
+            return parts
+        return []
+
+
+class ExtractRequest(BaseModel):
+    """Request payload schema for the POST /extract endpoint."""
+
+    text: str | None = PydanticField(
+        default=None,
+        description="Resume text content to extract information from",
+    )
+    resume_text: str | None = PydanticField(
+        default=None,
+        description="Alternative key for resume text content",
+    )
+    provider: str = PydanticField(
+        default="gemini",
+        description="Target LLM provider ('gemini', 'groq', 'ollama')",
+        examples=["gemini"],
     )

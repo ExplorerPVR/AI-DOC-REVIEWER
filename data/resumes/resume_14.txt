@@ -1,0 +1,5 @@
+Nina Johansson
+Email: nina.j@stockholmai.se
+Phone: +46 8 123 456
+Background: Applied GenAI developer implementing RAG pipelines and vector database retrieval.
+Skills: LangChain, LlamaIndex, Pinecone, OpenAI, Python, FastEmbed
