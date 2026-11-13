@@ -347,19 +347,25 @@ Subsequent calls to `POST /extract` only bill the cached prefix at a fraction of
 
 ## 📊 Resume Extraction Evaluation & Benchmark (`scripts/eval_extract.py`)
 
-A benchmark suite evaluating the 20 synthetic resumes in `data/resumes/` against ground truth annotations in `data/resumes/expected.json`:
+A benchmark suite evaluating candidate resumes in `data/resumes/` against ground truth annotations in `data/resumes/expected.json`. The dataset contains **25 resumes**:
+- **20 Base Resumes**: Standard clean formats evaluating standard fields, null normalization, and prompt injection defense.
+- **5 Challenging Resumes (`resume_21` to `resume_25`)**: Real-world messy layouts (ASCII/pipe tables), missing contact fields, technical skills dispersed across job experience/narrative paragraphs (no explicit "Skills:" header), non-standard punctuation/headers, and distractor references.
+
+The evaluation script reports both **Strict** (exact set equality on skills, exact digits, exact casing) and **Lenient** (Jaccard similarity $\ge 0.70$ / subset on skills, tolerant title matching, normalized phone digits) scores:
 
 ```bash
-# Run evaluation across all 20 resumes
+# Run evaluation across all 25 resumes
 uv run python scripts/eval_extract.py --provider groq --pause 1.0
 ```
 
-### Benchmark Score:
+### Benchmark Scores:
 ```text
-20/20 valid, 80/80 fields correct
+Score (Strict):  25/25 valid, 98/100 fields correct
+Score (Lenient): 25/25 valid, 100/100 fields correct
 ```
-- **Validity Rate**: 100% (20/20 valid JSON responses conforming strictly to `ResumeData`).
-- **Field Accuracy**: 100% (80/80 fields matching ground truth across name, email, phone, and skills).
+- **Validity Rate**: 100% (25/25 valid JSON responses conforming strictly to `ResumeData`).
+- **Strict Accuracy**: 98.0% (98/100 fields correct; Name: 25/25, Email: 25/25, Phone: 25/25, Skills Exact Set: 23/25).
+- **Lenient Accuracy**: 100.0% (100/100 fields correct with Jaccard $\ge 0.70$ / subset matching on dispersed skills).
 - **Prompt Injection Defense**: Successfully resisted adversarial prompt injection attacks (`resume_13.txt`), correctly extracting real candidate details without altering output.
 
 ---
@@ -370,7 +376,7 @@ The CI pipeline runs automatically on all pushes and pull requests via GitHub Ac
 
 ### Workflow Steps:
 1. **Lint & Code Style**: Runs `uv run ruff check .` to check for style violations, unformatted imports, and common programming errors.
-2. **Automated Testing**: Runs `uv run pytest` to execute the full unit and integration test suite (38 automated tests) against the in-memory SQLite database.
+2. **Automated Testing**: Runs `uv run pytest` to execute the full unit and integration test suite (39 automated tests) against the in-memory SQLite database.
 
 ### Running CI Checks Locally:
 ```bash

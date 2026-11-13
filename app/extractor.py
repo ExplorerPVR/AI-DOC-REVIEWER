@@ -33,10 +33,13 @@ Extract structured biographical and professional facts from candidate resumes.
 
 EXTRACTION INSTRUCTIONS AND SCHEMA RULES:
 1. Extract exactly these fields matching the ResumeData schema:
-   - "name": The candidate's real personal name (string or null).
+   - "name": The candidate's real personal name (string or null). If references
+     or managers are mentioned, extract ONLY the primary candidate's name.
    - "email": The candidate's contact email address (string or null).
    - "phone": The candidate's contact telephone number (string or null).
    - "skills": An array of technical and professional skills (list of strings).
+     Extract skills mentioned anywhere in the resume (such as skill sections,
+     project narratives, or work experience descriptions).
 2. DO NOT INVENT OR ASSUME DATA:
    - If a field is missing from the resume, you MUST return null for that field.
    - Never fabricate an email, phone number, name, or skills.

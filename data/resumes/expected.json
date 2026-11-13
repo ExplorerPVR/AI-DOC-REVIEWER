@@ -232,5 +232,70 @@
     "email": null,
     "phone": null,
     "skills": []
+  },
+  "resume_21.txt": {
+    "name": "Dr. Aris Thorne",
+    "email": "aris.thorne@quantum-labs.org",
+    "phone": "+1-800-555-0144",
+    "skills": [
+      "C++",
+      "CUDA",
+      "Python",
+      "OpenMP",
+      "Kubernetes",
+      "Slurm"
+    ]
+  },
+  "resume_22.txt": {
+    "name": "Maya Lin",
+    "email": null,
+    "phone": null,
+    "skills": [
+      "Figma",
+      "React",
+      "TypeScript",
+      "CSS",
+      "WebGL"
+    ]
+  },
+  "resume_23.txt": {
+    "name": "Rajesh K. Patel",
+    "email": "rajesh.patel.dev@cloudmail.com",
+    "phone": "+91 98765 43210",
+    "skills": [
+      "Go",
+      "Kafka",
+      "PostgreSQL",
+      "Redis",
+      "Terraform",
+      "AWS",
+      "Docker"
+    ]
+  },
+  "resume_24.txt": {
+    "name": "Zoe Vance-Montgomery",
+    "email": "zoe.vm@cyber-sec.defense.gov",
+    "phone": "(202) 555-0188",
+    "skills": [
+      "Ghidra",
+      "IDA Pro",
+      "Python",
+      "Bash",
+      "Snort",
+      "Wireshark"
+    ]
+  },
+  "resume_25.txt": {
+    "name": "Kavita Subramanian",
+    "email": "kavita.subramanian@nlp-ai.org",
+    "phone": "+1 (617) 555-7821",
+    "skills": [
+      "PyTorch",
+      "Hugging Face",
+      "Ray",
+      "Llama",
+      "Mistral",
+      "Qdrant"
+    ]
   }
 }

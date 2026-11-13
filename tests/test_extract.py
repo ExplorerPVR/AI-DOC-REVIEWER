@@ -274,3 +274,40 @@ def test_extract_unsupported_provider_returns_400(client: TestClient):
     )
     assert response.status_code == 400
     assert "Unsupported LLM provider" in response.json()["detail"]
+
+
+def test_compare_fields_strict_and_lenient():
+    """Verify strict vs lenient metrics differentiate exact vs partial matches."""
+    from scripts.eval_extract import compare_fields
+
+    predicted = ResumeData(
+        name="Dr. Aris Thorne",
+        email="aris.thorne@quantum-labs.org",
+        phone="8005550144",
+        skills=["C++", "CUDA", "Python", "OpenMP", "Kubernetes"],
+    )
+    expected = {
+        "name": "Aris Thorne",
+        "email": "aris.thorne@quantum-labs.org",
+        "phone": "+1-800-555-0144",
+        "skills": ["C++", "CUDA", "Python", "OpenMP", "Kubernetes", "Slurm"],
+    }
+
+    strict, lenient = compare_fields(predicted, expected)
+
+    # Name: Strict false (has 'Dr.'), lenient true (substring)
+    assert strict["name"] is False
+    assert lenient["name"] is True
+
+    # Email: Both true
+    assert strict["email"] is True
+    assert lenient["email"] is True
+
+    # Phone: Strict false (missing +1 prefix), lenient true (suffix match)
+    assert strict["phone"] is False
+    assert lenient["phone"] is True
+
+    # Skills: Strict false (5/6 items), lenient true (Jaccard = 5/6 = 0.833 >= 0.70)
+    assert strict["skills"] is False
+    assert lenient["skills"] is True
+
