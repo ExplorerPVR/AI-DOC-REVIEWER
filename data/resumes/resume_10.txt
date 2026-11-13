@@ -1,0 +1,5 @@
+James O'Connor
+Email: j.oconnor@cloudinfra.ie
+Phone: +353 1 234 5678
+Background: Site Reliability Engineer focused on high availability, automated runbooks, and telemetry.
+Core Skills: Prometheus, Grafana, Ansible, Go, Kubernetes, Linux

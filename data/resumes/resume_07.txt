@@ -1,0 +1,5 @@
+Grace Hopper
+Email: grace.hopper@navy.mil
+Phone: +1 (555) 888-1959
+Profile: Computer scientist and software engineering pioneer.
+Expertise: COBOL, Compilers, Assembly, Systems Architecture, Debugging

@@ -1,0 +1,5 @@
+Omar Farooq
+Email: omar.farooq@qa-automations.com
+Phone: +1 (555) 678-9012
+Summary: QA lead designing robust end-to-end automation test suites for web services.
+Competencies: Selenium, Cypress, Playwright, Pytest, Postman, Jest

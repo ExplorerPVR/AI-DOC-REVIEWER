@@ -1,0 +1,301 @@
+{
+  "resume_01.txt": {
+    "name": "Alice Johnson",
+    "email": "alice.johnson@example.com",
+    "phone": "+1 (555) 123-4567",
+    "skills": [
+      "Python",
+      "Django",
+      "FastAPI",
+      "PostgreSQL",
+      "Docker",
+      "Redis"
+    ]
+  },
+  "resume_02.txt": {
+    "name": "Bob Smith",
+    "email": "bob.smith@techworld.org",
+    "phone": null,
+    "skills": [
+      "React",
+      "TypeScript",
+      "Next.js",
+      "Tailwind CSS",
+      "GraphQL"
+    ]
+  },
+  "resume_03.txt": {
+    "name": "Carol Williams",
+    "email": null,
+    "phone": "+1 (555) 987-6543",
+    "skills": [
+      "AWS",
+      "Kubernetes",
+      "Terraform",
+      "Docker",
+      "CI/CD",
+      "Linux",
+      "Bash"
+    ]
+  },
+  "resume_04.txt": {
+    "name": "Daniel Brown",
+    "email": "daniel.brown@analytics.net",
+    "phone": "+1 (555) 345-6789",
+    "skills": []
+  },
+  "resume_05.txt": {
+    "name": "Elena Rostova",
+    "email": null,
+    "phone": null,
+    "skills": [
+      "Markdown",
+      "Sphinx",
+      "OpenAPI",
+      "Git",
+      "Technical Documentation"
+    ]
+  },
+  "resume_06.txt": {
+    "name": "Frank Zhang",
+    "email": "frank.zhang@datascience.io",
+    "phone": "+1 (555) 456-7890",
+    "skills": [
+      "Python",
+      "PyTorch",
+      "Scikit-Learn",
+      "Pandas",
+      "NumPy",
+      "SQL"
+    ]
+  },
+  "resume_07.txt": {
+    "name": "Grace Hopper",
+    "email": "grace.hopper@navy.mil",
+    "phone": "+1 (555) 888-1959",
+    "skills": [
+      "COBOL",
+      "Compilers",
+      "Assembly",
+      "Systems Architecture",
+      "Debugging"
+    ]
+  },
+  "resume_08.txt": {
+    "name": "Hassan Al-Mansoor",
+    "email": "hassan.m@cybersec.ae",
+    "phone": "+971 50 123 4567",
+    "skills": [
+      "SIEM",
+      "Wireshark",
+      "Penetration Testing",
+      "Python",
+      "Network Security",
+      "Snort"
+    ]
+  },
+  "resume_09.txt": {
+    "name": "Isabella Rossi",
+    "email": "i.rossi@designstudio.it",
+    "phone": "+39 02 1234567",
+    "skills": [
+      "Figma",
+      "Adobe XD",
+      "Wireframing",
+      "User Research",
+      "Prototyping"
+    ]
+  },
+  "resume_10.txt": {
+    "name": "James O'Connor",
+    "email": "j.oconnor@cloudinfra.ie",
+    "phone": "+353 1 234 5678",
+    "skills": [
+      "Prometheus",
+      "Grafana",
+      "Ansible",
+      "Go",
+      "Kubernetes",
+      "Linux"
+    ]
+  },
+  "resume_11.txt": {
+    "name": "Kavita Patel",
+    "email": "kavita.patel@fintech.in",
+    "phone": "+91 98765 43210",
+    "skills": [
+      "PostgreSQL",
+      "Oracle",
+      "MySQL",
+      "Performance Tuning",
+      "Database Replication"
+    ]
+  },
+  "resume_12.txt": {
+    "name": "Lucas Silva",
+    "email": "lucas.silva@mobileapps.br",
+    "phone": "+55 11 98765-4321",
+    "skills": [
+      "Swift",
+      "Kotlin",
+      "Flutter",
+      "iOS",
+      "Android",
+      "REST APIs"
+    ]
+  },
+  "resume_13.txt": {
+    "name": "David Miller",
+    "email": "david.miller@defensecorp.com",
+    "phone": "+1 (555) 789-0123",
+    "skills": [
+      "C",
+      "C++",
+      "Rust",
+      "Cryptography",
+      "Linux Kernel"
+    ]
+  },
+  "resume_14.txt": {
+    "name": "Nina Johansson",
+    "email": "nina.j@stockholmai.se",
+    "phone": "+46 8 123 456",
+    "skills": [
+      "LangChain",
+      "LlamaIndex",
+      "Pinecone",
+      "OpenAI",
+      "Python",
+      "FastEmbed"
+    ]
+  },
+  "resume_15.txt": {
+    "name": "Omar Farooq",
+    "email": "omar.farooq@qa-automations.com",
+    "phone": "+1 (555) 678-9012",
+    "skills": [
+      "Selenium",
+      "Cypress",
+      "Playwright",
+      "Pytest",
+      "Postman",
+      "Jest"
+    ]
+  },
+  "resume_16.txt": {
+    "name": "Priya Sharma",
+    "email": null,
+    "phone": "+91 91234 56789",
+    "skills": [
+      "Java",
+      "Spring Boot",
+      "Apache Kafka",
+      "Microservices",
+      "Hibernate",
+      "Maven"
+    ]
+  },
+  "resume_17.txt": {
+    "name": "Quentin Dupont",
+    "email": "quentin.dupont@embedded-tech.fr",
+    "phone": "+33 1 42 68 00 00",
+    "skills": [
+      "Embedded C",
+      "RTOS",
+      "CAN Bus",
+      "Microcontrollers",
+      "ARM Cortex",
+      "I2C"
+    ]
+  },
+  "resume_18.txt": {
+    "name": "Rachel Green",
+    "email": "rachel.green@fashionops.com",
+    "phone": null,
+    "skills": []
+  },
+  "resume_19.txt": {
+    "name": "Samuel Taylor",
+    "email": "samuel.taylor@fullstackhub.com",
+    "phone": "+1 (555) 234-5670",
+    "skills": [
+      "TypeScript",
+      "Node.js",
+      "Express",
+      "React",
+      "MongoDB",
+      "AWS Lambda"
+    ]
+  },
+  "resume_20.txt": {
+    "name": "Marcus Aurelius",
+    "email": null,
+    "phone": null,
+    "skills": []
+  },
+  "resume_21.txt": {
+    "name": "Dr. Aris Thorne",
+    "email": "aris.thorne@quantum-labs.org",
+    "phone": "+1-800-555-0144",
+    "skills": [
+      "C++",
+      "CUDA",
+      "Python",
+      "OpenMP",
+      "Kubernetes",
+      "Slurm"
+    ]
+  },
+  "resume_22.txt": {
+    "name": "Maya Lin",
+    "email": null,
+    "phone": null,
+    "skills": [
+      "Figma",
+      "React",
+      "TypeScript",
+      "CSS",
+      "WebGL"
+    ]
+  },
+  "resume_23.txt": {
+    "name": "Rajesh K. Patel",
+    "email": "rajesh.patel.dev@cloudmail.com",
+    "phone": "+91 98765 43210",
+    "skills": [
+      "Go",
+      "Kafka",
+      "PostgreSQL",
+      "Redis",
+      "Terraform",
+      "AWS",
+      "Docker"
+    ]
+  },
+  "resume_24.txt": {
+    "name": "Zoe Vance-Montgomery",
+    "email": "zoe.vm@cyber-sec.defense.gov",
+    "phone": "(202) 555-0188",
+    "skills": [
+      "Ghidra",
+      "IDA Pro",
+      "Python",
+      "Bash",
+      "Snort",
+      "Wireshark"
+    ]
+  },
+  "resume_25.txt": {
+    "name": "Kavita Subramanian",
+    "email": "kavita.subramanian@nlp-ai.org",
+    "phone": "+1 (617) 555-7821",
+    "skills": [
+      "PyTorch",
+      "Hugging Face",
+      "Ray",
+      "Llama",
+      "Mistral",
+      "Qdrant"
+    ]
+  }
+}

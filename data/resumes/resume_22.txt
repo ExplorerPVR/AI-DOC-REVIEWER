@@ -1,0 +1,8 @@
+Maya Lin
+Berlin, Germany | Portfolio: mayalin.design | GitHub: @mayalin
+
+About Me:
+Staff Product Designer and Frontend Prototyper with a passion for human-computer
+interaction. Over the past eight years, I have crafted high-fidelity interactive
+web interfaces using Figma, React, TypeScript, CSS, and WebGL, collaborating
+directly with core engineering groups to deliver accessible design systems.

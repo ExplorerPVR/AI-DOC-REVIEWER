@@ -1,0 +1,13 @@
+Rajesh K. Patel
+rajesh.patel.dev@cloudmail.com | +91 98765 43210 | Bangalore, India
+
+WORK EXPERIENCE:
+
+Lead Backend Engineer — Nexus FinTech (2021 – Present)
+- Architected event-driven transaction processing services in Go and Kafka.
+- Scaled PostgreSQL relational storage handling over 10M transactions daily.
+- Integrated Redis for low-latency session caching and distributed locking.
+
+Cloud Systems Engineer — DataSphere Technologies (2018 – 2021)
+- Managed automated cloud infrastructure deployments using Terraform and AWS.
+- Containerized enterprise microservices with Docker and deployed to ECS.

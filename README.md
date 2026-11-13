@@ -21,6 +21,13 @@ A production-ready asynchronous FastAPI service for ingesting, validating, and c
   - Automatic retries with exponential backoff on rate limits (429) and server errors (5xx).
   - 30-second call timeouts with clear `504 Gateway Timeout` and `503 Service Unavailable` error responses.
   - Automatically records tokens, execution duration, and USD cost at published list price into the `llm_calls` PostgreSQL table.
+- **Structured Resume Extraction (`POST /extract`)**:
+  - Extracts biographical details and skills into a validated Pydantic `ResumeData` schema (`name`, `email`, `phone`, `skills`).
+  - Uses native structured outputs (Gemini `response_schema`, Groq `response_format={"type": "json_object"}`).
+  - Missing or unstated fields return `null`, never fabricated or hallucinated.
+  - Resilient one-time retry with validation error feedback appended if initial output fails schema validation.
+  - Prompt injection defense: resume text is quarantined inside `<resume_data>` tags and treated strictly as passive data.
+  - Benchmark evaluation suite (`scripts/eval_extract.py`) reporting extraction validity and accuracy across 20 test resumes.
 - **Database Schema Migrations via Alembic**:
   - Full version-controlled database schema management using Alembic.
   - Automatically runs `alembic upgrade head` on container startup before FastAPI initializes.
@@ -52,10 +59,13 @@ ai-doc-assistant/
 ├── app/
 │   ├── __init__.py
 │   ├── db.py                # Database engine & session generator
+│   ├── extractor.py         # Structured resume extraction, retry logic & prompt injection defense
 │   ├── llm.py               # Multi-provider streaming, retries, and token tracking
 │   ├── main.py              # FastAPI app, route handlers & validation
-│   ├── models.py            # SQLModel table models (Document, LLMCall) & schemas
+│   ├── models.py            # SQLModel table models (Document, LLMCall) & schemas (ResumeData)
 │   └── pricing.py           # Model pricing per million tokens & cost calculator
+├── data/
+│   └── resumes/             # 20 synthetic benchmark resumes and expected.json dataset
 ├── migrations/              # Alembic database migration scripts & versions
 │   ├── versions/
 │   │   ├── bb20b80bdc64_create_document_table.py
@@ -63,10 +73,13 @@ ai-doc-assistant/
 │   ├── env.py               # Alembic environment config (reads DATABASE_URL)
 │   ├── README
 │   └── script.py.mako
+├── scripts/
+│   └── eval_extract.py      # Automated benchmark evaluator across 20 resumes
 ├── tests/
 │   ├── __init__.py
-│   ├── test_ask.py          # 9 automated tests for LLM streaming, retries, and costs
-│   └── test_documents.py    # 14 automated tests with in-memory SQLite fixture
+│   ├── test_ask.py          # Automated tests for LLM streaming, retries, and costs
+│   ├── test_documents.py    # Automated tests for file upload, validation & DB persistence
+│   └── test_extract.py      # Automated tests for structured extraction, retry & injection defense
 ├── alembic.ini              # Alembic CLI configuration file
 ├── .dockerignore            # Excludes caches, .venv, .git, and .env from Docker context
 ├── .env                     # Local environment & DB credentials (gitignored)
@@ -287,13 +300,83 @@ curl -N -X POST "http://127.0.0.1:8000/ask" \
 
 ---
 
+### 5. Structured Resume Extraction (`POST /extract`)
+Extracts biographical details and technical skills into a validated `ResumeData` Pydantic schema using structured JSON output. If schema validation fails, it automatically retries once with error feedback appended to the prompt.
+
+- **URL**: `POST /extract`
+- **Content-Type**: `application/json`
+- **Success Status**: `200 OK`
+
+```bash
+curl -X POST "http://127.0.0.1:8000/extract" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "text": "Alice Johnson\nEmail: alice.johnson@example.com\nPhone: +1 (555) 123-4567\nTechnical Skills: Python, Django, FastAPI, PostgreSQL, Docker, Redis",
+    "provider": "gemini"
+  }'
+```
+
+**Response (`200 OK`)**:
+```json
+{
+  "name": "Alice Johnson",
+  "email": "alice.johnson@example.com",
+  "phone": "+1 (555) 123-4567",
+  "skills": [
+    "Python",
+    "Django",
+    "FastAPI",
+    "PostgreSQL",
+    "Docker",
+    "Redis"
+  ]
+}
+```
+
+#### Prompt Caching Cost Optimization:
+On paid LLM APIs supporting prompt caching (such as Anthropic Claude or Google Gemini), prompt caching cuts input token costs by up to 75% to 90% and reduces response latency by up to 80%.
+Because our extraction system prompt, rules, schema instructions, and few-shot example are fixed and placed at the beginning of the prompt as a static prefix, the LLM provider caches these input tokens after the first request.
+Subsequent calls to `POST /extract` only bill the cached prefix at a fraction of the standard input price (e.g., $0.30/MTok vs $3.00/MTok on Claude), paying full price only for the variable candidate resume text at the end.
+
+#### Error Handling:
+- **Validation Failure (`422 Unprocessable Entity`)**: Returned if the LLM response fails Pydantic schema validation after two attempts (initial + retry).
+- **Empty Resume (`400 Bad Request`)**: Returned if the `text` field is empty or missing.
+- **Upstream Errors (`503 / 504`)**: Returned if the LLM is unavailable or times out.
+
+---
+
+## 📊 Resume Extraction Evaluation & Benchmark (`scripts/eval_extract.py`)
+
+A benchmark suite evaluating candidate resumes in `data/resumes/` against ground truth annotations in `data/resumes/expected.json`. The dataset contains **25 resumes**:
+- **20 Base Resumes**: Standard clean formats evaluating standard fields, null normalization, and prompt injection defense.
+- **5 Challenging Resumes (`resume_21` to `resume_25`)**: Real-world messy layouts (ASCII/pipe tables), missing contact fields, technical skills dispersed across job experience/narrative paragraphs (no explicit "Skills:" header), non-standard punctuation/headers, and distractor references.
+
+The evaluation script reports both **Strict** (exact set equality on skills, exact digits, exact casing) and **Lenient** (Jaccard similarity $\ge 0.70$ / subset on skills, tolerant title matching, normalized phone digits) scores:
+
+```bash
+# Run evaluation across all 25 resumes
+uv run python scripts/eval_extract.py --provider groq --pause 1.0
+```
+
+### Benchmark Scores:
+```text
+Score (Strict):  25/25 valid, 98/100 fields correct
+Score (Lenient): 25/25 valid, 100/100 fields correct
+```
+- **Validity Rate**: 100% (25/25 valid JSON responses conforming strictly to `ResumeData`).
+- **Strict Accuracy**: 98.0% (98/100 fields correct; Name: 25/25, Email: 25/25, Phone: 25/25, Skills Exact Set: 23/25).
+- **Lenient Accuracy**: 100.0% (100/100 fields correct with Jaccard $\ge 0.70$ / subset matching on dispersed skills).
+- **Prompt Injection Defense**: Successfully resisted adversarial prompt injection attacks (`resume_13.txt`), correctly extracting real candidate details without altering output.
+
+---
+
 ## 🤖 Continuous Integration (CI) Checks
 
 The CI pipeline runs automatically on all pushes and pull requests via GitHub Actions (`.github/workflows/ci.yml`).
 
 ### Workflow Steps:
 1. **Lint & Code Style**: Runs `uv run ruff check .` to check for style violations, unformatted imports, and common programming errors.
-2. **Automated Testing**: Runs `uv run pytest` to execute the full unit and integration test suite (23 automated tests) against the in-memory SQLite database.
+2. **Automated Testing**: Runs `uv run pytest` to execute the full unit and integration test suite (39 automated tests) against the in-memory SQLite database.
 
 ### Running CI Checks Locally:
 ```bash

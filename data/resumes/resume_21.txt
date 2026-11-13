@@ -1,0 +1,14 @@
+================================================================================
+| CANDIDATE PROFILE: Dr. Aris Thorne                                           |
+| Email: aris.thorne@quantum-labs.org            | Phone: +1-800-555-0144       |
+| Location: Boulder, CO                          | Clearance: Secret            |
+================================================================================
+SUMMARY:
+Principal Research Scientist with 12+ years optimizing high-performance computing
+simulations and scientific computation clusters.
+
+PROJECT HIGHLIGHTS & ARCHITECTURE:
+- Spearheaded quantum simulation pipelines utilizing C++, CUDA, Python, and OpenMP.
+- Orchestrated distributed workloads across Kubernetes and Slurm clusters.
+- Authored distributed memory benchmarks reducing cluster latency by 42%.
+================================================================================

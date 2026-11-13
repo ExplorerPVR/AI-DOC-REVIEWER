@@ -1,0 +1,5 @@
+Priya Sharma
+Phone: +91 91234 56789
+Location: Bangalore, India
+Profile: Enterprise Java developer focused on microservices and asynchronous event messaging.
+Skills: Java, Spring Boot, Apache Kafka, Microservices, Hibernate, Maven

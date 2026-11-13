@@ -1,0 +1,5 @@
+Frank Zhang
+Email: frank.zhang@datascience.io
+Phone: +1 (555) 456-7890
+Summary: Machine learning researcher specializing in NLP and predictive modeling.
+Technologies: Python, PyTorch, Scikit-Learn, Pandas, NumPy, SQL

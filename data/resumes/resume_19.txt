@@ -1,0 +1,5 @@
+Samuel Taylor
+Email: samuel.taylor@fullstackhub.com
+Phone: +1 (555) 234-5670
+Profile: Full-stack engineer with expertise across reactive frontend frameworks and serverless backends.
+Skills: TypeScript, Node.js, Express, React, MongoDB, AWS Lambda

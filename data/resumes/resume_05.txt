@@ -1,0 +1,4 @@
+Elena Rostova
+Location: Austin, Texas
+Experienced technical writer who drafts comprehensive API specifications and developer onboarding tutorials.
+Proficiencies: Markdown, Sphinx, OpenAPI, Git, Technical Documentation

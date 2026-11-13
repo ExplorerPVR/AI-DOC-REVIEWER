@@ -1,0 +1,5 @@
+Alice Johnson
+Email: alice.johnson@example.com
+Phone: +1 (555) 123-4567
+Professional Summary: Senior Software Engineer with 6 years experience in distributed backend architectures.
+Technical Skills: Python, Django, FastAPI, PostgreSQL, Docker, Redis

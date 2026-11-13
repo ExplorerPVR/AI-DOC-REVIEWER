@@ -1,0 +1,13 @@
+Kavita Subramanian
+kavita.subramanian@nlp-ai.org | +1 (617) 555-7821 | Cambridge, MA
+
+Machine Learning Researcher specializing in generative NLP and vector retrieval.
+
+Selected Projects:
+- Developed multilingual translation workflows utilizing PyTorch, Hugging Face, and Ray.
+- Fine-tuned large language models including Llama and Mistral for domain tasks.
+- Implemented high-dimensional vector search indices using Qdrant.
+
+Professional References:
+- Dr. Alan Turing (Academic Advisor) — alan.turing@cambridge.edu | 555-019-9999
+- Sarah Jenkins (Engineering VP) — sjenkins@enterprise.com | 555-019-8888

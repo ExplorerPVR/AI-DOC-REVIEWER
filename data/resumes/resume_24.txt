@@ -1,0 +1,11 @@
+NAME: Zoe Vance-Montgomery
+CONTACT DETAILS:
+   >> ELECTRONIC MAIL: zoe.vm@cyber-sec.defense.gov
+   >> TELEPHONE: (202) 555-0188
+   >> RESIDENCE: Washington, DC
+
+OPERATIONAL RECORD:
+Security research and vulnerability assessment. Reverse-engineered proprietary
+firmware binaries using Ghidra and IDA Pro. Automated vulnerability exploitation
+scripts and network intrusion tests with Python and Bash. Configured Snort IDS
+and Wireshark for deep packet inspection and network telemetry.
