@@ -390,7 +390,7 @@ def extract_resume(
     session: Annotated[Session, Depends(get_session)],
 ) -> ResumeData:
     """Extract structured ResumeData from provided resume text."""
-    content = (request.text or request.resume_text or "").strip()
+    content = request.text.strip()
     if not content:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,

@@ -208,13 +208,9 @@ class ResumeData(BaseModel):
 class ExtractRequest(BaseModel):
     """Request payload schema for the POST /extract endpoint."""
 
-    text: str | None = PydanticField(
-        default=None,
+    text: str = PydanticField(
+        default="",
         description="Resume text content to extract information from",
-    )
-    resume_text: str | None = PydanticField(
-        default=None,
-        description="Alternative key for resume text content",
     )
     provider: str = PydanticField(
         default="gemini",
