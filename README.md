@@ -198,33 +198,30 @@ curl -X POST "http://127.0.0.1:8000/documents" \
   "filename": "agreement.pdf",
   "content_type": "application/pdf",
   "size_bytes": 1048576,
-  "uploaded_at": "2026-10-29T14:30:00.123456Z"
+  "uploaded_at": "2026-10-29T14:30:00.123456Z",
+  "status": "pending"
 }
 ```
+
+Uploaded files are saved directly to the `uploads/` directory (mounted via Docker volume `uploads_data`). For PDFs, a background job (`FastAPI BackgroundTasks`) is queued immediately to extract text, chunk, embed, and store vectors in PostgreSQL without delaying the `201 Created` HTTP response.
 
 #### Error Responses:
 - **Empty File (`400 Bad Request`)**:
   ```json
   {
-    "detail": "Empty file. Uploaded file contains no data."
+    "detail": "The uploaded file is empty or contains only whitespace."
   }
   ```
 - **Blank Document (`400 Bad Request`)**:
   ```json
   {
-    "detail": "Blank document. PDF has no readable text or visual content."
-  }
-  ```
-  or
-  ```json
-  {
-    "detail": "Blank document. File contains only whitespace characters."
+    "detail": "The uploaded PDF contains no extractable text."
   }
   ```
 - **Corrupted Document (`400 Bad Request`)**:
   ```json
   {
-    "detail": "Corrupted or invalid file. Unable to parse PDF document."
+    "detail": "Corrupted file: invalid or unreadable PDF structure."
   }
   ```
 - **Wrong File Type (`415 Unsupported Media Type`)**:
@@ -243,7 +240,7 @@ curl -X POST "http://127.0.0.1:8000/documents" \
 ---
 
 ### 3. List Documents
-Fetches all stored document records from PostgreSQL.
+Fetches all stored document records from PostgreSQL, including their ingestion status.
 
 - **URL**: `GET /documents`
 - **Status**: `200 OK`
@@ -260,16 +257,39 @@ curl -X GET "http://127.0.0.1:8000/documents"
     "filename": "agreement.pdf",
     "content_type": "application/pdf",
     "size_bytes": 1048576,
-    "uploaded_at": "2026-10-29T14:30:00.123456Z"
+    "uploaded_at": "2026-10-29T14:30:00.123456Z",
+    "status": "ready"
   }
 ]
 ```
 
 ---
 
+### 4. Get Document Details & Status
+Inspect the current status (`pending`, `processing`, `ready`, or `failed`) and failure details.
+
+- **URL**: `GET /documents/{document_id}`
+- **Status**: `200 OK`
+
+```bash
+curl -X GET "http://127.0.0.1:8000/documents/550e8400-e29b-41d4-a716-446655440000"
+```
+
 ---
 
-### 4. Ask an LLM (Streaming Completion)
+### 5. Get Document Chunks & Embeddings
+Inspect the extracted text chunks and vector embeddings generated for an ingested document.
+
+- **URL**: `GET /documents/{document_id}/chunks`
+- **Status**: `200 OK`
+
+```bash
+curl -X GET "http://127.0.0.1:8000/documents/550e8400-e29b-41d4-a716-446655440000/chunks"
+```
+
+---
+
+### 6. Ask an LLM (Streaming Completion)
 Streams answers from configured LLM providers (Gemini, Groq, Ollama) with automatic retries, timeouts, and call cost logging.
 
 - **URL**: `POST /ask`
@@ -300,7 +320,7 @@ curl -N -X POST "http://127.0.0.1:8000/ask" \
 
 ---
 
-### 5. Structured Resume Extraction (`POST /extract`)
+### 7. Structured Resume Extraction (`POST /extract`)
 Extracts biographical details and technical skills into a validated `ResumeData` Pydantic schema using structured JSON output. If schema validation fails, it automatically retries once with error feedback appended to the prompt.
 
 - **URL**: `POST /extract`
@@ -345,6 +365,21 @@ Subsequent calls to `POST /extract` only bill the cached prefix at a fraction of
 
 ---
 
+## ⚡ Background PDF Ingestion & pgvector Chunks
+
+When a PDF document is uploaded via `POST /documents`:
+1. **File Storage**: The file is stored in `uploads/` (persisted across restarts via Docker volume `uploads_data`).
+2. **Immediate 201 Response**: The HTTP endpoint creates the Document record with `status: "pending"` and returns immediately.
+3. **Background Ingestion Worker**: A FastAPI `BackgroundTask` executes asynchronously:
+   - Reads the PDF page-by-page using **PyMuPDF**.
+   - Chunks the text into overlapping segments of ~500 to 1,000 characters (preserving original `filename` and 1-based `page_number`).
+   - Generates 768-dimensional dense vector embeddings using Google Gemini (`gemini-embedding-001` / `text-embedding-004`) or local Ollama (`nomic-embed-text`).
+   - Persists each chunk into the PostgreSQL `chunks` table utilizing the **pgvector** `Vector(768)` data type.
+   - Transitions `Document.status` to `ready`.
+4. **Resilience**: If unparseable or corrupted PDF data is encountered, the document status transitions to `failed` with descriptive `error_message`, ensuring zero server crashes.
+
+---
+
 ## 📊 Resume Extraction Evaluation & Benchmark (`scripts/eval_extract.py`)
 
 A benchmark suite evaluating candidate resumes in `data/resumes/` against ground truth annotations in `data/resumes/expected.json`. The dataset contains **25 resumes**:
@@ -376,7 +411,7 @@ The CI pipeline runs automatically on all pushes and pull requests via GitHub Ac
 
 ### Workflow Steps:
 1. **Lint & Code Style**: Runs `uv run ruff check .` to check for style violations, unformatted imports, and common programming errors.
-2. **Automated Testing**: Runs `uv run pytest` to execute the full unit and integration test suite (39 automated tests) against the in-memory SQLite database.
+2. **Automated Testing**: Runs `uv run pytest` to execute the full unit and integration test suite (54 automated tests) against the in-memory SQLite database.
 
 ### Running CI Checks Locally:
 ```bash

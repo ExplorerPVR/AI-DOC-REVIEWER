@@ -83,13 +83,16 @@ def session_fixture() -> Generator[Session, None, None]:
 
 
 @pytest.fixture(name="client")
-def client_fixture(session: Session) -> Generator[TestClient, None, None]:
+def client_fixture(
+    session: Session, monkeypatch: pytest.MonkeyPatch
+) -> Generator[TestClient, None, None]:
     """Provide a TestClient with the database session dependency overridden."""
 
     def get_session_override() -> Generator[Session, None, None]:
         yield session
 
     app.dependency_overrides[get_session] = get_session_override
+    monkeypatch.setattr("app.main.ingest_document_pdf", lambda *args, **kwargs: None)
     client = TestClient(app)
     yield client
     app.dependency_overrides.clear()

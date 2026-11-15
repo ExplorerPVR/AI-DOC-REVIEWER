@@ -9,7 +9,15 @@ from pathlib import Path
 from typing import Annotated
 
 from docx import Document as DocxDocument
-from fastapi import Depends, FastAPI, File, HTTPException, UploadFile, status
+from fastapi import (
+    BackgroundTasks,
+    Depends,
+    FastAPI,
+    File,
+    HTTPException,
+    UploadFile,
+    status,
+)
 from fastapi.responses import StreamingResponse
 from pypdf import PdfReader
 from pypdf.errors import PdfReadError
@@ -17,6 +25,7 @@ from sqlmodel import Session, select
 
 from app.db import get_session
 from app.extractor import extract_resume_data
+from app.ingestion import ingest_document_pdf
 from app.llm import (
     LLMError,
     LLMRateLimitError,
@@ -26,8 +35,11 @@ from app.llm import (
 )
 from app.models import (
     AskRequest,
+    Chunk,
+    ChunkResponse,
     Document,
     DocumentResponse,
+    DocumentStatus,
     ErrorResponse,
     ExtractRequest,
     HealthResponse,
@@ -43,6 +55,7 @@ MAX_FILE_SIZE_BYTES: int = int(
 )  # 10 MB limit
 CHUNK_SIZE_BYTES: int = 1024 * 1024  # 1 MB read chunk size
 ALLOWED_EXTENSIONS: set[str] = {".pdf", ".txt", ".docx"}
+UPLOAD_DIR: Path = Path(os.getenv("UPLOAD_DIR", "uploads"))
 
 app = FastAPI(
     title="AI Document Assistant",
@@ -179,8 +192,9 @@ async def upload_document(
         File(description="Document file to upload (.pdf, .txt, .docx)"),
     ],
     session: Annotated[Session, Depends(get_session)],
+    background_tasks: BackgroundTasks,
 ) -> Document:
-    """Validate uploaded document and record metadata in PostgreSQL."""
+    """Validate uploaded document, save to disk, and trigger background ingestion."""
     filename = file.filename or ""
     extension = Path(filename).suffix.lower()
 
@@ -237,15 +251,39 @@ async def upload_document(
     # 6. Extract content type with fallback
     content_type = file.content_type or "application/octet-stream"
 
-    # 7. Create and persist Document model to database
+    # 7. Initial status: pending for PDF (background ingestion), ready for others
+    initial_status = (
+        DocumentStatus.PENDING if extension == ".pdf" else DocumentStatus.READY
+    )
+
+    # 8. Create and persist Document model to database
     doc_record = Document(
         filename=filename,
         content_type=content_type,
         size_bytes=size_bytes,
+        status=initial_status,
     )
     session.add(doc_record)
     session.commit()
     session.refresh(doc_record)
+
+    # 9. Save uploaded file to disk
+    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    saved_file_path = UPLOAD_DIR / f"{doc_record.id}_{filename}"
+    saved_file_path.write_bytes(content)
+
+    doc_record.file_path = str(saved_file_path)
+    session.add(doc_record)
+    session.commit()
+    session.refresh(doc_record)
+
+    # 10. Schedule background ingestion for PDFs
+    if extension == ".pdf":
+        background_tasks.add_task(
+            ingest_document_pdf,
+            document_id=doc_record.id,
+            file_path=str(saved_file_path),
+        )
 
     return doc_record
 
@@ -265,6 +303,77 @@ async def list_documents(
     statement = select(Document).order_by(Document.uploaded_at)
     documents = session.exec(statement).all()
     return list(documents)
+
+
+@app.get(
+    "/documents/{document_id}",
+    response_model=DocumentResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Get Document Details",
+    description="Retrieve metadata and ingestion status for a single document.",
+    tags=["Documents"],
+)
+def get_document(
+    document_id: str,
+    session: Annotated[Session, Depends(get_session)],
+) -> Document:
+    """Retrieve document metadata and current ingestion status by ID."""
+    from uuid import UUID
+
+    try:
+        doc_uuid = UUID(document_id)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Invalid document UUID format: '{document_id}'",
+        )
+
+    doc = session.get(Document, doc_uuid)
+    if not doc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Document '{document_id}' not found.",
+        )
+    return doc
+
+
+@app.get(
+    "/documents/{document_id}/chunks",
+    response_model=list[ChunkResponse],
+    status_code=status.HTTP_200_OK,
+    summary="Get Document Chunks",
+    description="Retrieve all text chunks generated for an ingested document.",
+    tags=["Documents"],
+)
+def get_document_chunks(
+    document_id: str,
+    session: Annotated[Session, Depends(get_session)],
+) -> list[Chunk]:
+    """Retrieve generated text chunks for an ingested document."""
+    from uuid import UUID
+
+    try:
+        doc_uuid = UUID(document_id)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Invalid document UUID format: '{document_id}'",
+        )
+
+    doc = session.get(Document, doc_uuid)
+    if not doc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Document '{document_id}' not found.",
+        )
+
+    statement = (
+        select(Chunk)
+        .where(Chunk.document_id == doc_uuid)
+        .order_by(Chunk.chunk_index)
+    )
+    chunks = session.exec(statement).all()
+    return list(chunks)
 
 
 @app.post(
