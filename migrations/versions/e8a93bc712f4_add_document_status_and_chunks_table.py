@@ -80,10 +80,19 @@ def upgrade() -> None:
     op.create_index(
         op.f("ix_chunks_filename"), "chunks", ["filename"], unique=False
     )
+    # 4. Create HNSW index for fast approximate nearest-neighbor vector search
+    op.create_index(
+        "ix_chunks_embedding_hnsw",
+        "chunks",
+        ["embedding"],
+        postgresql_using="hnsw",
+        postgresql_ops={"embedding": "vector_cosine_ops"},
+    )
 
 
 def downgrade() -> None:
     """Downgrade schema."""
+    op.drop_index("ix_chunks_embedding_hnsw", table_name="chunks")
     op.drop_index(op.f("ix_chunks_filename"), table_name="chunks")
     op.drop_index(op.f("ix_chunks_document_id"), table_name="chunks")
     op.drop_index(op.f("ix_chunks_id"), table_name="chunks")

@@ -2,6 +2,7 @@
 
 import logging
 import os
+import re
 from collections.abc import Callable
 from pathlib import Path
 from uuid import UUID
@@ -11,6 +12,7 @@ import pymupdf
 from sqlmodel import Session
 
 import app.db as db_module
+from app.llm import retry
 from app.models import Chunk, Document, DocumentStatus
 
 logger = logging.getLogger(__name__)
@@ -18,6 +20,47 @@ logger = logging.getLogger(__name__)
 EMBEDDING_DIMENSION = 768
 DEFAULT_CHUNK_SIZE = 800
 DEFAULT_CHUNK_OVERLAP = 150
+DEFAULT_BATCH_SIZE = 16
+
+# Reusable client instances to prevent socket exhaustion and per-chunk setup overhead
+_gemini_client = None
+_ollama_client: httpx.Client | None = None
+
+
+def get_gemini_client(api_key: str):
+    """Retrieve or initialize singleton Google GenAI client."""
+    global _gemini_client
+    if _gemini_client is None:
+        from google import genai
+
+        _gemini_client = genai.Client(api_key=api_key)
+    return _gemini_client
+
+
+def get_ollama_client(timeout: float = 30.0) -> httpx.Client:
+    """Retrieve or initialize singleton HTTP client for Ollama."""
+    global _ollama_client
+    if _ollama_client is None or _ollama_client.is_closed:
+        _ollama_client = httpx.Client(timeout=timeout)
+    return _ollama_client
+
+
+def sanitize_error_message(exc: Exception) -> str:
+    """Sanitize error message to prevent leaking internal URLs, keys, or details."""
+    raw = str(exc)
+    # Redact potential API keys or tokens (alphanumeric sequences >= 20 chars)
+    sanitized = re.sub(
+        r"(?:key|token|secret|api)[=:][\s]*([^\s&,]+)",
+        r"[REDACTED]",
+        raw,
+        flags=re.IGNORECASE,
+    )
+    sanitized = re.sub(r"https?://[^\s]+", "[REDACTED_URL]", sanitized)
+    lines = [line.strip() for line in sanitized.splitlines() if line.strip()]
+    first_meaningful_line = lines[-1] if lines else "Ingestion processing error"
+    if len(first_meaningful_line) > 150:
+        first_meaningful_line = first_meaningful_line[:147] + "..."
+    return first_meaningful_line
 
 
 def read_pdf_pages(file_path: str | Path) -> list[tuple[int, str]]:
@@ -64,7 +107,11 @@ def chunk_text(
     chunk_size: int = DEFAULT_CHUNK_SIZE,
     chunk_overlap: int = DEFAULT_CHUNK_OVERLAP,
 ) -> list[str]:
-    """Split text into overlapping chunks of approximately 500 to 1,000 characters."""
+    """Split text into overlapping chunks snapping cleanly to word boundaries.
+
+    Ensures chunks are between ~500 to 1,000 characters and never begin or end
+    mid-word.
+    """
     cleaned = text.strip()
     if not cleaned:
         return []
@@ -98,56 +145,81 @@ def chunk_text(
         if end >= text_len:
             break
 
-        start = max(end - chunk_overlap, start + 1)
+        # Calculate nominal overlap start and snap forward to next whole word boundary
+        raw_start = max(end - chunk_overlap, start + 1)
+        if raw_start < text_len:
+            space_pos = cleaned.find(" ", raw_start, min(raw_start + 40, text_len))
+            if space_pos != -1 and space_pos + 1 < text_len:
+                start = space_pos + 1
+            else:
+                start = raw_start
+        else:
+            start = raw_start
 
     return chunks
 
 
-def generate_embedding(
-    text: str,
-    provider: str | None = None,
+@retry(max_retries=3, delay=1.0, backoff=2.0)
+def _embed_batch_with_retry(
+    texts: list[str],
+    provider: str,
     timeout: float = 30.0,
-) -> list[float]:
-    """Generate a 768-dimensional dense vector embedding for the given text.
-
-    Supports Gemini (text-embedding-004 / gemini-embedding-001) and Ollama
-    (nomic-embed-text).
-    """
-    chosen_provider = (
-        provider or os.getenv("EMBEDDING_PROVIDER") or "gemini"
-    ).lower()
-
-    if chosen_provider == "gemini":
+) -> list[list[float]]:
+    """Execute batched embedding API call with exponential retry logic."""
+    if provider == "gemini":
         api_key = os.getenv("GEMINI_API_KEY")
         if not api_key:
             raise ValueError("GEMINI_API_KEY environment variable is not configured.")
 
-        from google import genai
         from google.genai import types
 
-        client = genai.Client(api_key=api_key)
+        client = get_gemini_client(api_key)
         model = os.getenv("GEMINI_EMBEDDING_MODEL", "gemini-embedding-001")
         response = client.models.embed_content(
             model=model,
-            contents=text,
+            contents=texts,
             config=types.EmbedContentConfig(
                 output_dimensionality=EMBEDDING_DIMENSION
             ),
         )
-        if not response.embeddings or not response.embeddings[0].values:
-            raise ValueError("Gemini returned empty embedding vector.")
-        vector = list(response.embeddings[0].values)
-        if len(vector) != EMBEDDING_DIMENSION:
+        if not response.embeddings or len(response.embeddings) != len(texts):
+            count = len(response.embeddings) if response.embeddings else 0
             raise ValueError(
-                f"Expected {EMBEDDING_DIMENSION}-dim vector, got {len(vector)}."
+                f"Gemini returned {count} embeddings for {len(texts)} texts."
             )
-        return vector
+        results: list[list[float]] = []
+        for emb in response.embeddings:
+            vector = list(emb.values)
+            if len(vector) != EMBEDDING_DIMENSION:
+                raise ValueError(
+                    f"Expected {EMBEDDING_DIMENSION}-dim vector, got {len(vector)}."
+                )
+            results.append(vector)
+        return results
 
-    elif chosen_provider == "ollama":
+    elif provider == "ollama":
         base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/")
         model = os.getenv("OLLAMA_EMBEDDING_MODEL", "nomic-embed-text")
+        client = get_ollama_client(timeout=timeout)
+
+        # Attempt batched embed API first
+        embed_url = f"{base_url}/api/embed"
+        try:
+            resp = client.post(embed_url, json={"model": model, "input": texts})
+            if resp.status_code == 200:
+                data = resp.json()
+                embeddings = data.get("embeddings", [])
+                if len(embeddings) == len(texts):
+                    return [[float(x) for x in emb] for emb in embeddings]
+        except Exception:
+            logger.debug(
+                "Ollama /api/embed unavailable, falling back to /api/embeddings"
+            )
+
+        # Fallback to sequential /api/embeddings with reused client
+        results = []
         url = f"{base_url}/api/embeddings"
-        with httpx.Client(timeout=timeout) as client:
+        for text in texts:
             resp = client.post(url, json={"model": model, "prompt": text})
             if resp.status_code != 200:
                 raise ValueError(
@@ -162,13 +234,56 @@ def generate_embedding(
                 raise ValueError(
                     f"Expected {EMBEDDING_DIMENSION}-dim vector, got {len(vector)}."
                 )
-            return [float(x) for x in vector]
+            results.append([float(x) for x in vector])
+        return results
 
     else:
         raise ValueError(
-            f"Unsupported embedding provider '{chosen_provider}'. "
+            f"Unsupported embedding provider '{provider}'. "
             f"Allowed providers: 'gemini', 'ollama'."
         )
+
+
+def generate_embeddings_batch(
+    texts: list[str],
+    provider: str | None = None,
+    batch_size: int = DEFAULT_BATCH_SIZE,
+    timeout: float = 30.0,
+) -> list[list[float]]:
+    """Generate 768-dimensional dense vector embeddings in batches with retries."""
+    if not texts:
+        return []
+
+    chosen_provider = (
+        provider or os.getenv("EMBEDDING_PROVIDER") or "gemini"
+    ).lower()
+
+    all_embeddings: list[list[float]] = []
+    for i in range(0, len(texts), batch_size):
+        batch = texts[i : i + batch_size]
+        batch_embeddings = _embed_batch_with_retry(
+            texts=batch,
+            provider=chosen_provider,
+            timeout=timeout,
+        )
+        all_embeddings.extend(batch_embeddings)
+
+    return all_embeddings
+
+
+def generate_embedding(
+    text: str,
+    provider: str | None = None,
+    timeout: float = 30.0,
+) -> list[float]:
+    """Generate single 768-dimensional dense vector embedding (wrapper for batch)."""
+    results = generate_embeddings_batch(
+        texts=[text],
+        provider=provider,
+        batch_size=1,
+        timeout=timeout,
+    )
+    return results[0]
 
 
 def ingest_document_pdf(
@@ -177,9 +292,14 @@ def ingest_document_pdf(
     session_factory: Callable[[], Session] | None = None,
     embedding_provider: str | None = None,
 ) -> None:
-    """Background ingestion worker: extracts PDF pages, chunks, embeds, and saves."""
+    """Background ingestion worker.
+
+    Separates database session ownership from external HTTP embedding calls to
+    prevent database connection pool starvation.
+    """
     get_db = session_factory or (lambda: Session(db_module.engine))
 
+    # Phase 1: Mark status as PROCESSING in short DB tx & release connection
     with get_db() as session:
         doc = session.get(Document, document_id)
         if not doc:
@@ -192,47 +312,75 @@ def ingest_document_pdf(
         doc.status = DocumentStatus.PROCESSING
         session.add(doc)
         session.commit()
-        logger.info(
-            "Started background ingestion for document %s (%s).",
-            document_id,
-            doc.filename,
+        filename = doc.filename
+
+    logger.info(
+        "Started background ingestion for document %s (%s).",
+        document_id,
+        filename,
+    )
+
+    # Phase 2: Compute & Network (PDF parsing, text chunking, external API embeddings)
+    # NO DB CONNECTION IS HELD DURING THIS PHASE!
+    error: Exception | None = None
+    chunk_records_data: list[tuple[int, int, str, list[float]]] = []
+
+    try:
+        pages = read_pdf_pages(file_path)
+        all_chunks: list[tuple[int, int, str]] = []
+        chunk_idx = 0
+        for page_num, page_text in pages:
+            page_chunks = chunk_text(page_text)
+            for chunk_str in page_chunks:
+                all_chunks.append((page_num, chunk_idx, chunk_str))
+                chunk_idx += 1
+
+        if not all_chunks:
+            raise ValueError("No extractable chunks found in PDF document.")
+
+        # Batch embed all chunks across external network
+        chunk_texts = [item[2] for item in all_chunks]
+        embeddings = generate_embeddings_batch(
+            texts=chunk_texts,
+            provider=embedding_provider,
         )
 
-        try:
-            # 1. Read PDF page by page
-            pages = read_pdf_pages(file_path)
+        for (page_num, chk_idx, chunk_str), vector in zip(all_chunks, embeddings):
+            chunk_records_data.append((page_num, chk_idx, chunk_str, vector))
 
-            # 2. Split each page's text into chunks of ~500-1000 characters
-            chunk_records: list[Chunk] = []
-            chunk_idx = 0
+    except Exception as exc:
+        logger.error(
+            "Failed to ingest document %s (%s): %s",
+            document_id,
+            filename,
+            exc,
+            exc_info=True,
+        )
+        error = exc
 
-            for page_num, page_text in pages:
-                page_chunks = chunk_text(page_text)
-                for chunk_str in page_chunks:
-                    # 3. Create 768-dim dense embedding
-                    vector = generate_embedding(
-                        text=chunk_str,
-                        provider=embedding_provider,
-                    )
-                    chunk_obj = Chunk(
-                        document_id=doc.id,
-                        filename=doc.filename,
-                        page_number=page_num,
-                        chunk_index=chunk_idx,
-                        text=chunk_str,
-                        embedding=vector,
-                    )
-                    chunk_records.append(chunk_obj)
-                    chunk_idx += 1
+    # Phase 3: Update DB in a second short transaction
+    with get_db() as session:
+        doc = session.get(Document, document_id)
+        if not doc:
+            return
 
-            if not chunk_records:
-                raise ValueError("No extractable chunks found in PDF document.")
-
-            # 4. Save all chunks to database
-            for chk in chunk_records:
+        if error is not None:
+            doc.status = DocumentStatus.FAILED
+            doc.error_message = sanitize_error_message(error)
+            session.add(doc)
+            session.commit()
+        else:
+            for page_num, chk_idx, chunk_str, vector in chunk_records_data:
+                chk = Chunk(
+                    document_id=doc.id,
+                    filename=filename,
+                    page_number=page_num,
+                    chunk_index=chk_idx,
+                    text=chunk_str,
+                    embedding=vector,
+                )
                 session.add(chk)
 
-            # 5. Mark document as ready
             doc.status = DocumentStatus.READY
             doc.error_message = None
             session.add(doc)
@@ -240,22 +388,6 @@ def ingest_document_pdf(
             logger.info(
                 "Successfully ingested document %s (%s): %d chunks stored in pgvector.",
                 document_id,
-                doc.filename,
-                len(chunk_records),
+                filename,
+                len(chunk_records_data),
             )
-
-        except Exception as exc:
-            logger.error(
-                "Failed to ingest document %s (%s): %s",
-                document_id,
-                doc.filename,
-                exc,
-                exc_info=True,
-            )
-            session.rollback()
-            refreshed_doc = session.get(Document, document_id)
-            if refreshed_doc:
-                refreshed_doc.status = DocumentStatus.FAILED
-                refreshed_doc.error_message = str(exc)
-                session.add(refreshed_doc)
-                session.commit()

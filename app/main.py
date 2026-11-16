@@ -3,11 +3,14 @@
 import io
 import logging
 import os
+import re
 import zipfile
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Annotated
+from uuid import UUID
 
+import pymupdf
 from docx import Document as DocxDocument
 from fastapi import (
     BackgroundTasks,
@@ -19,8 +22,6 @@ from fastapi import (
     status,
 )
 from fastapi.responses import StreamingResponse
-from pypdf import PdfReader
-from pypdf.errors import PdfReadError
 from sqlmodel import Session, select
 
 from app.db import get_session
@@ -92,22 +93,16 @@ def validate_file_content(content: bytes, extension: str) -> None:
                 detail="Corrupted file: unable to decode text file contents.",
             )
 
-    # 2. PDF validation via pypdf (.pdf)
+    # 2. PDF validation via PyMuPDF (.pdf)
     elif extension == ".pdf":
         try:
-            pdf = PdfReader(io.BytesIO(content))
-            if len(pdf.pages) == 0:
+            doc = pymupdf.open(stream=content, filetype="pdf")
+            if len(doc) == 0:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="The uploaded PDF contains no extractable text.",
                 )
-            has_text = any((page.extract_text() or "").strip() for page in pdf.pages)
-            has_images = any(len(page.images) > 0 for page in pdf.pages)
-        except (PdfReadError, EOFError):
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="The uploaded PDF is invalid or unreadable.",
-            )
+            has_text = any(bool(page.get_text("text").strip()) for page in doc)
         except HTTPException:
             raise
         except Exception:
@@ -115,8 +110,11 @@ def validate_file_content(content: bytes, extension: str) -> None:
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="The uploaded PDF is invalid or unreadable.",
             )
+        finally:
+            if "doc" in locals() and not doc.is_closed:
+                doc.close()
 
-        if not has_text and not has_images:
+        if not has_text:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="The uploaded PDF contains no extractable text.",
@@ -267,12 +265,22 @@ async def upload_document(
     session.commit()
     session.refresh(doc_record)
 
-    # 9. Save uploaded file to disk
+    # 9. Save uploaded file to disk with path traversal sanitization
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-    saved_file_path = UPLOAD_DIR / f"{doc_record.id}_{filename}"
-    saved_file_path.write_bytes(content)
+    raw_name = Path(filename).name
+    safe_name = re.sub(r"[^a-zA-Z0-9_.-]", "_", raw_name)
+    if not safe_name or safe_name.replace(".", "") == "":
+        safe_name = f"document{extension}"
 
-    doc_record.file_path = str(saved_file_path)
+    destination = (UPLOAD_DIR / f"{doc_record.id}_{safe_name}").resolve()
+    if not destination.is_relative_to(UPLOAD_DIR.resolve()):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid filename path traversal attempt.",
+        )
+    destination.write_bytes(content)
+
+    doc_record.file_path = str(destination)
     session.add(doc_record)
     session.commit()
     session.refresh(doc_record)
@@ -282,7 +290,7 @@ async def upload_document(
         background_tasks.add_task(
             ingest_document_pdf,
             document_id=doc_record.id,
-            file_path=str(saved_file_path),
+            file_path=str(destination),
         )
 
     return doc_record
@@ -314,21 +322,11 @@ def list_documents(
     tags=["Documents"],
 )
 def get_document(
-    document_id: str,
+    document_id: UUID,
     session: Annotated[Session, Depends(get_session)],
 ) -> Document:
     """Retrieve document metadata and current ingestion status by ID."""
-    from uuid import UUID
-
-    try:
-        doc_uuid = UUID(document_id)
-    except ValueError:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Invalid document UUID format: '{document_id}'",
-        )
-
-    doc = session.get(Document, doc_uuid)
+    doc = session.get(Document, document_id)
     if not doc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -346,21 +344,11 @@ def get_document(
     tags=["Documents"],
 )
 def get_document_chunks(
-    document_id: str,
+    document_id: UUID,
     session: Annotated[Session, Depends(get_session)],
 ) -> list[Chunk]:
     """Retrieve generated text chunks for an ingested document."""
-    from uuid import UUID
-
-    try:
-        doc_uuid = UUID(document_id)
-    except ValueError:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Invalid document UUID format: '{document_id}'",
-        )
-
-    doc = session.get(Document, doc_uuid)
+    doc = session.get(Document, document_id)
     if not doc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -369,7 +357,7 @@ def get_document_chunks(
 
     statement = (
         select(Chunk)
-        .where(Chunk.document_id == doc_uuid)
+        .where(Chunk.document_id == document_id)
         .order_by(Chunk.chunk_index)
     )
     chunks = session.exec(statement).all()

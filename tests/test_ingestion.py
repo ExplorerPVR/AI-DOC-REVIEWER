@@ -17,8 +17,10 @@ from app.ingestion import (
     EMBEDDING_DIMENSION,
     chunk_text,
     generate_embedding,
+    generate_embeddings_batch,
     ingest_document_pdf,
     read_pdf_pages,
+    sanitize_error_message,
 )
 from app.main import app
 from app.models import Chunk, Document, DocumentStatus
@@ -87,11 +89,16 @@ def client_fixture(
     orig_engine = db_module.engine
     db_module.engine = test_engine
 
-    # Mock embedding call to avoid external network dependencies during tests
+    # Mock embedding calls to avoid external network dependencies during tests
     monkeypatch.setattr(
         ingestion_module,
         "generate_embedding",
         lambda *args, **kwargs: [0.05] * EMBEDDING_DIMENSION,
+    )
+    monkeypatch.setattr(
+        ingestion_module,
+        "generate_embeddings_batch",
+        lambda texts, *args, **kwargs: [[0.05] * EMBEDDING_DIMENSION for _ in texts],
     )
 
     client = TestClient(app)
@@ -125,6 +132,28 @@ def test_chunk_text_splits_with_overlap():
     for chunk in chunks:
         assert len(chunk) <= 850
         assert len(chunk) >= 400
+
+
+def test_chunk_text_overlap_snaps_to_words():
+    """Verify chunk overlap does not break words in half."""
+    words = [f"token{i}" for i in range(250)]
+    text = " ".join(words)
+    chunks = chunk_text(text, chunk_size=300, chunk_overlap=80)
+    for chk in chunks:
+        first_word = chk.split()[0]
+        assert first_word in words
+
+
+def test_sanitize_error_message():
+    """Verify error sanitization redacts URLs and API tokens."""
+    exc = RuntimeError(
+        "Failed connecting to https://api.groq.com/v1 with "
+        "api_key=sk-1234567890abcdef1234567890"
+    )
+    sanitized = sanitize_error_message(exc)
+    assert "[REDACTED]" in sanitized
+    assert "[REDACTED_URL]" in sanitized
+    assert "sk-1234567890" not in sanitized
 
 
 def test_read_pdf_pages_multipage(tmp_path: Path):
@@ -174,8 +203,9 @@ def test_generate_embedding_gemini(monkeypatch: pytest.MonkeyPatch):
     mock_resp = MagicMock(embeddings=[mock_embedding_obj])
     mock_client.models.embed_content.return_value = mock_resp
 
-    from google import genai
-    monkeypatch.setattr(genai, "Client", lambda api_key: mock_client)
+    monkeypatch.setattr(
+        ingestion_module, "get_gemini_client", lambda api_key: mock_client
+    )
 
     result = generate_embedding("sample text", provider="gemini")
     assert len(result) == 768
@@ -184,22 +214,27 @@ def test_generate_embedding_gemini(monkeypatch: pytest.MonkeyPatch):
 
 def test_generate_embedding_ollama(monkeypatch: pytest.MonkeyPatch):
     """Verify generate_embedding calls Ollama endpoint and returns 768-dim list."""
-    import httpx
 
-    class MockResponse:
-        status_code = 200
+    class MockClient:
+        is_closed = False
 
-        def json(self):
-            return {"embedding": [0.456] * 768}
+        def post(self, url, *args, **kwargs):
+            class MockResponse:
+                status_code = 200
 
-    def mock_post(*args, **kwargs):
-        return MockResponse()
+                def json(self):
+                    return {"embeddings": [[0.456] * 768]}
 
-    monkeypatch.setattr(httpx.Client, "post", mock_post)
+            return MockResponse()
 
-    result = generate_embedding("sample text", provider="ollama")
-    assert len(result) == 768
-    assert result[0] == pytest.approx(0.456)
+    monkeypatch.setattr(
+        ingestion_module, "get_ollama_client", lambda *args, **kwargs: MockClient()
+    )
+
+    result = generate_embeddings_batch(["sample text"], provider="ollama")
+    assert len(result) == 1
+    assert len(result[0]) == 768
+    assert result[0][0] == pytest.approx(0.456)
 
 
 def test_generate_embedding_unsupported_provider():
@@ -208,7 +243,9 @@ def test_generate_embedding_unsupported_provider():
         generate_embedding("text", provider="unknown_ai")
 
 
-def test_background_ingestion_success(tmp_path: Path, session: Session):
+def test_background_ingestion_success(
+    tmp_path: Path, session: Session, monkeypatch: pytest.MonkeyPatch
+):
     """Verify background ingestion parses PDF, chunks, embeds, and marks ready."""
     pdf_file = tmp_path / "research_paper.pdf"
     create_sample_multipage_pdf(pdf_file)
@@ -224,20 +261,17 @@ def test_background_ingestion_success(tmp_path: Path, session: Session):
     session.commit()
     session.refresh(doc)
 
-    def mock_embed(text, *args, **kwargs):
-        return [0.01] * EMBEDDING_DIMENSION
+    monkeypatch.setattr(
+        ingestion_module,
+        "generate_embeddings_batch",
+        lambda texts, *args, **kwargs: [[0.01] * EMBEDDING_DIMENSION for _ in texts],
+    )
 
-    orig_embed = ingestion_module.generate_embedding
-    ingestion_module.generate_embedding = mock_embed
-
-    try:
-        ingest_document_pdf(
-            document_id=doc.id,
-            file_path=str(pdf_file),
-            session_factory=lambda: Session(test_engine),
-        )
-    finally:
-        ingestion_module.generate_embedding = orig_embed
+    ingest_document_pdf(
+        document_id=doc.id,
+        file_path=str(pdf_file),
+        session_factory=lambda: Session(test_engine),
+    )
 
     # Verify document status updated to READY
     with Session(test_engine) as check_session:
@@ -248,7 +282,9 @@ def test_background_ingestion_success(tmp_path: Path, session: Session):
 
         # Verify chunks created in DB
         chunks = check_session.exec(
-            select(Chunk).where(Chunk.document_id == doc.id).order_by(Chunk.chunk_index)
+            select(Chunk)
+            .where(Chunk.document_id == doc.id)
+            .order_by(Chunk.chunk_index)
         ).all()
         assert len(chunks) >= 2
         for chk in chunks:
@@ -322,7 +358,7 @@ def test_background_ingestion_empty_pdf_ends_as_failed(
 
 
 def test_background_ingestion_embedding_error_ends_as_failed(
-    tmp_path: Path, session: Session
+    tmp_path: Path, session: Session, monkeypatch: pytest.MonkeyPatch
 ):
     """Verify embedding API failure transitions status to failed gracefully."""
     pdf_file = tmp_path / "valid_doc.pdf"
@@ -342,17 +378,17 @@ def test_background_ingestion_embedding_error_ends_as_failed(
     def failing_embed(*args, **kwargs):
         raise RuntimeError("Quota exhausted on embedding provider.")
 
-    orig_embed = ingestion_module.generate_embedding
-    ingestion_module.generate_embedding = failing_embed
+    monkeypatch.setattr(
+        ingestion_module,
+        "generate_embeddings_batch",
+        failing_embed,
+    )
 
-    try:
-        ingest_document_pdf(
-            document_id=doc.id,
-            file_path=str(pdf_file),
-            session_factory=lambda: Session(test_engine),
-        )
-    finally:
-        ingestion_module.generate_embedding = orig_embed
+    ingest_document_pdf(
+        document_id=doc.id,
+        file_path=str(pdf_file),
+        session_factory=lambda: Session(test_engine),
+    )
 
     with Session(test_engine) as check_session:
         updated_doc = check_session.get(Document, doc.id)
@@ -390,6 +426,34 @@ def test_upload_pdf_returns_201_and_saves_file(
     detail_res = client.get(f"/documents/{doc_id}")
     assert detail_res.status_code == 200
     assert detail_res.json()["id"] == doc_id
+
+
+def test_upload_path_traversal_sanitized(
+    client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Verify filename with path traversal characters is safely sanitized."""
+    pdf_path = tmp_path / "valid.pdf"
+    create_sample_multipage_pdf(pdf_path)
+    uploads_dir = tmp_path / "test_uploads"
+    monkeypatch.setattr("app.main.UPLOAD_DIR", uploads_dir)
+
+    files = {
+        "file": ("../../etc/passwd.pdf", pdf_path.read_bytes(), "application/pdf")
+    }
+    response = client.post("/documents", files=files)
+    assert response.status_code == 201
+
+    doc_id = response.json()["id"]
+    saved = list(uploads_dir.glob(f"{doc_id}_*"))
+    assert len(saved) == 1
+    assert saved[0].is_relative_to(uploads_dir)
+    assert ".." not in saved[0].name
+
+
+def test_get_document_invalid_uuid_returns_422(client: TestClient):
+    """Verify FastAPI auto-validates UUID path parameter and returns 422."""
+    resp = client.get("/documents/not-a-valid-uuid")
+    assert resp.status_code == 422
 
 
 def test_get_document_chunks_endpoint(client: TestClient, session: Session):

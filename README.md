@@ -411,7 +411,7 @@ The CI pipeline runs automatically on all pushes and pull requests via GitHub Ac
 
 ### Workflow Steps:
 1. **Lint & Code Style**: Runs `uv run ruff check .` to check for style violations, unformatted imports, and common programming errors.
-2. **Automated Testing**: Runs `uv run pytest` to execute the full unit and integration test suite (54 automated tests) against the in-memory SQLite database.
+2. **Automated Testing**: Runs `uv run pytest` to execute the full unit and integration test suite (58 automated tests) against the in-memory SQLite database.
 
 ### Running CI Checks Locally:
 ```bash
