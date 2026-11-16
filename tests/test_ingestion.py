@@ -16,6 +16,7 @@ from app.db import get_session
 from app.ingestion import (
     EMBEDDING_DIMENSION,
     chunk_text,
+    clean_pdf_text,
     generate_embedding,
     generate_embeddings_batch,
     ingest_document_pdf,
@@ -142,6 +143,47 @@ def test_chunk_text_overlap_snaps_to_words():
     for chk in chunks:
         first_word = chk.split()[0]
         assert first_word in words
+
+
+def test_clean_pdf_text_dehyphenation_and_citations():
+    """Verify clean_pdf_text unwraps hyphens and separates citation markers."""
+    raw = (
+        "Self-supervised representations with a joint-\n"
+        "embedding predictive architecture.\n"
+        "[14] K. He et al., “Masked autoencoders.”"
+    )
+    cleaned = clean_pdf_text(raw)
+    assert "joint-embedding" in cleaned
+    assert "predictive architecture.\n\n[14]" in cleaned
+
+
+def test_chunk_text_academic_citations():
+    """Verify academic citations do not get cut mid-sentence or mid-name."""
+    sample = (
+        "[13] M. Caron, H. Touvron, I. Misra, H. Jegou, J. Mairal, P. Bojanowski, and "
+        "A. Joulin, “Emerging properties in self-supervised vision transformers,” "
+        "in Proc. IEEE/CVF Int. Conf. Computer Vision (ICCV), 2021, pp. 9650–9660.\n"
+        "[14] K. He, X. Chen, S. Xie, Y. Li, P. Dollar, and R. Girshick, “Masked "
+        "autoencoders are scalable vision learners,” in Proc. IEEE/CVF Conf. "
+        "Computer Vision and Pattern Recognition (CVPR), 2022, pp. 16000–16009.\n"
+        "[15] A. Baevski, W.-N. Hsu, Q. Xu, A. Babu, J. Gu, and M. Auli, “data2vec: "
+        "A general framework for self-supervised learning in speech, vision and "
+        "language,” in Proc. 39th Int. Conf. Machine Learning (ICML), PMLR "
+        "vol. 162, 2022, pp. 1298–1312.\n"
+        "[16] M. Assran et al., “Self-supervised learning from images with a joint-\n"
+        "embedding predictive architecture,” in Proc. IEEE/CVF Conf. Computer "
+        "Vision and Pattern Recognition (CVPR), 2023, pp. 5792–5801."
+    )
+    chunks = chunk_text(sample, chunk_size=450, chunk_overlap=80)
+    assert len(chunks) >= 2
+    combined = " ".join(chunks)
+    assert "joint-embedding" in combined
+    for chk in chunks:
+        # None of the chunks should start with fragmented author suffixes like "ki, and"
+        assert not chk.startswith("ki,")
+        assert not chk.startswith("and ")
+        # No raw newline breaks inside hyphenated words
+        assert "joint-\n" not in chk
 
 
 def test_sanitize_error_message():

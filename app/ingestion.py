@@ -102,17 +102,37 @@ def read_pdf_pages(file_path: str | Path) -> list[tuple[int, str]]:
         doc.close()
 
 
+def clean_pdf_text(text: str) -> str:
+    """Normalize PDF text by removing hyphenation and unwrapping soft linebreaks.
+
+    - Resolves hyphenated words split across lines (e.g. 'joint-\\nembedding').
+    - Converts citation markers (e.g. '\\n[14]') into distinct block boundaries.
+    - Unwraps soft visual linebreaks within sentences into single spaces.
+    - Preserves true structural double newlines ('\\n\\n').
+    """
+    cleaned = text.replace("\r\n", "\n").replace("\r", "\n")
+    # Join hyphenated words broken across physical line breaks
+    cleaned = re.sub(r"(\w+)-\s*\n\s*(\w+)", r"\1-\2", cleaned)
+    # Ensure citation anchors like "\n[14]" act as block paragraphs
+    cleaned = re.sub(r"(?<!\n)\n(\[\d+\])", r"\n\n\1", cleaned)
+    # Replace soft single newlines within sentences with a space
+    cleaned = re.sub(r"(?<!\n)\n(?!\n)", " ", cleaned)
+    # Collapse multiple consecutive horizontal whitespace characters
+    cleaned = re.sub(r"[ \t]+", " ", cleaned)
+    return cleaned.strip()
+
+
 def chunk_text(
     text: str,
     chunk_size: int = DEFAULT_CHUNK_SIZE,
     chunk_overlap: int = DEFAULT_CHUNK_OVERLAP,
 ) -> list[str]:
-    """Split text into overlapping chunks snapping cleanly to word boundaries.
+    """Split text into overlapping chunks snapping cleanly to sentences or words.
 
-    Ensures chunks are between ~500 to 1,000 characters and never begin or end
-    mid-word.
+    Ensures chunks are between ~500 to 1,000 characters and avoids cutting
+    sentences, citations, or words in half.
     """
-    cleaned = text.strip()
+    cleaned = clean_pdf_text(text)
     if not cleaned:
         return []
 
@@ -128,9 +148,10 @@ def chunk_text(
 
         # Look for a natural split boundary in the tail window of the chunk
         if end < text_len:
-            search_start = max(start + chunk_size - 200, start)
+            search_start = max(start + chunk_size - 250, start)
             best_break = -1
-            for sep in ["\n\n", "\n", ". ", "; ", ", ", " "]:
+            # Prioritize paragraph/citation breaks and sentences over newlines
+            for sep in ["\n\n", ". ", "? ", "! ", "; ", "\n", ", ", " "]:
                 pos = cleaned.rfind(sep, search_start, end)
                 if pos != -1:
                     best_break = pos + len(sep)
@@ -145,14 +166,29 @@ def chunk_text(
         if end >= text_len:
             break
 
-        # Calculate nominal overlap start and snap forward to next whole word boundary
+        # Calculate nominal overlap start and snap to sentence, citation, or word
         raw_start = max(end - chunk_overlap, start + 1)
         if raw_start < text_len:
-            space_pos = cleaned.find(" ", raw_start, min(raw_start + 40, text_len))
-            if space_pos != -1 and space_pos + 1 < text_len:
-                start = space_pos + 1
+            boundary_pos = -1
+            # Search backward first (up to 150 chars) to capture complete unit
+            for boundary in ["\n\n[", "\n\n", ". "]:
+                p = cleaned.rfind(
+                    boundary, max(start + 1, raw_start - 150), min(raw_start + 60, end)
+                )
+                if p != -1:
+                    boundary_pos = (
+                        p + 2 if boundary.startswith("\n\n") else p + len(boundary)
+                    )
+                    break
+
+            if boundary_pos != -1 and start < boundary_pos < end:
+                start = boundary_pos
             else:
-                start = raw_start
+                space_pos = cleaned.find(" ", raw_start, min(raw_start + 40, end))
+                if space_pos != -1 and space_pos + 1 < end:
+                    start = space_pos + 1
+                else:
+                    start = raw_start
         else:
             start = raw_start
 
