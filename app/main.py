@@ -18,6 +18,7 @@ from fastapi import (
     FastAPI,
     File,
     HTTPException,
+    Query,
     UploadFile,
     status,
 )
@@ -26,7 +27,7 @@ from sqlmodel import Session, select
 
 from app.db import get_session
 from app.extractor import extract_resume_data
-from app.ingestion import ingest_document_pdf
+from app.ingestion import ingest_document_pdf, search_chunks
 from app.llm import (
     LLMError,
     LLMRateLimitError,
@@ -45,6 +46,7 @@ from app.models import (
     ExtractRequest,
     HealthResponse,
     ResumeData,
+    SearchResult,
 )
 from app.pricing import DEFAULT_MODELS
 
@@ -389,6 +391,45 @@ def get_document_chunks(
     )
     chunks = session.exec(statement).all()
     return list(chunks)
+
+
+@app.get(
+    "/search",
+    response_model=list[SearchResult],
+    status_code=status.HTTP_200_OK,
+    summary="Semantic Document Search",
+    description=(
+        "Search ingested document chunks by semantic cosine distance using "
+        "pgvector's <=> operator, returning the top k most relevant matches."
+    ),
+    tags=["Search"],
+)
+def search_documents(
+    q: Annotated[
+        str,
+        Query(
+            min_length=1,
+            description="Search query question to embed and search",
+        ),
+    ],
+    session: Annotated[Session, Depends(get_session)],
+    k: Annotated[
+        int,
+        Query(
+            ge=1,
+            le=100,
+            description="Number of closest chunks to return (default 5)",
+        ),
+    ] = 5,
+) -> list[SearchResult]:
+    """Return the k closest document chunks to query q sorted by cosine distance."""
+    if not q or not q.strip():
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="Search query 'q' must not be empty or whitespace.",
+        )
+
+    return search_chunks(query=q.strip(), k=k, session=session)
 
 
 @app.post(

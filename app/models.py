@@ -158,6 +158,23 @@ class ChunkResponse(ChunkBase):
     created_at: datetime
 
 
+class SearchResult(SQLModel):
+    """Schema for individual search matches returned by GET /search."""
+
+    text: str = SQLModelField(
+        description="Text content of the matching document chunk",
+    )
+    filename: str = SQLModelField(
+        description="Source document file name",
+    )
+    page: int = SQLModelField(
+        description="1-based page number where the chunk appears",
+    )
+    score: float = SQLModelField(
+        description="Cosine similarity score (higher is closer, range [0, 1])",
+    )
+
+
 class LLMCallBase(SQLModel):
     """Base schema holding metadata for tracked LLM generations."""
 

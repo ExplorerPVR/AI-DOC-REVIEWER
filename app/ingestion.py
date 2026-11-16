@@ -1,6 +1,7 @@
 """Background PDF ingestion, page extraction, chunking, and pgvector embeddings."""
 
 import logging
+import math
 import os
 import re
 from collections.abc import Callable
@@ -9,11 +10,11 @@ from uuid import UUID
 
 import httpx
 import pymupdf
-from sqlmodel import Session, delete
+from sqlmodel import Session, delete, func, select
 
 import app.db as db_module
 from app.llm import retry
-from app.models import Chunk, Document, DocumentStatus
+from app.models import Chunk, Document, DocumentStatus, SearchResult
 
 logger = logging.getLogger(__name__)
 
@@ -464,3 +465,94 @@ def ingest_document_pdf(
                 filename,
                 len(chunk_records_data),
             )
+
+
+def search_chunks(
+    query: str,
+    k: int = 5,
+    session: Session | None = None,
+    embedding_provider: str | None = None,
+) -> list[SearchResult]:
+    """Search ingested document chunks by semantic cosine distance using pgvector.
+
+    1. Embeds query using the configured embedding model.
+    2. If no documents are in READY status, returns an empty list [].
+    3. Searches Chunk table using pgvector cosine distance (<=> operator),
+       joined to Document where status is READY.
+    4. Returns up to k closest chunks sorted by cosine distance ascending.
+    """
+    if not query or not query.strip():
+        return []
+
+    query_vector = generate_embedding(query.strip(), provider=embedding_provider)
+
+    own_session = session is None
+    s = Session(db_module.engine) if own_session else session
+
+    try:
+        # Check if any documents are in READY status
+        ready_count = s.exec(
+            select(func.count(Document.id)).where(
+                Document.status == DocumentStatus.READY
+            )
+        ).one()
+        if ready_count == 0:
+            return []
+
+        dialect_name = s.get_bind().dialect.name
+        if dialect_name == "postgresql":
+            # Native pgvector cosine distance (<=> operator)
+            dist_expr = Chunk.embedding.cosine_distance(query_vector)
+            stmt = (
+                select(
+                    Chunk.text,
+                    Chunk.filename,
+                    Chunk.page_number,
+                    dist_expr.label("distance"),
+                )
+                .join(Document, Chunk.document_id == Document.id)
+                .where(Document.status == DocumentStatus.READY)
+                .order_by(dist_expr)
+                .limit(k)
+            )
+            rows = s.exec(stmt).all()
+            return [
+                SearchResult(
+                    text=row[0],
+                    filename=row[1],
+                    page=row[2],
+                    score=round(max(0.0, 1.0 - float(row[3])), 4),
+                )
+                for row in rows
+            ]
+        else:
+            # Fallback for SQLite in unit tests
+            stmt = (
+                select(Chunk)
+                .join(Document, Chunk.document_id == Document.id)
+                .where(Document.status == DocumentStatus.READY)
+            )
+            chunks = s.exec(stmt).all()
+            scored: list[tuple[Chunk, float, float]] = []
+            for chk in chunks:
+                dot = sum(a * b for a, b in zip(chk.embedding, query_vector))
+                norm1 = math.sqrt(sum(a * a for a in chk.embedding))
+                norm2 = math.sqrt(sum(b * b for b in query_vector))
+                sim = (dot / (norm1 * norm2)) if (norm1 and norm2) else 0.0
+                dist = max(0.0, min(2.0, 1.0 - sim))
+                scored.append((chk, dist, max(0.0, sim)))
+
+            scored.sort(key=lambda item: item[1])
+            top_k = scored[:k]
+            return [
+                SearchResult(
+                    text=chk.text,
+                    filename=chk.filename,
+                    page=chk.page_number,
+                    score=round(sim_val, 4),
+                )
+                for chk, dist, sim_val in top_k
+            ]
+    finally:
+        if own_session:
+            s.close()
