@@ -9,7 +9,7 @@ from uuid import UUID
 
 import httpx
 import pymupdf
-from sqlmodel import Session
+from sqlmodel import Session, delete
 
 import app.db as db_module
 from app.llm import retry
@@ -428,6 +428,7 @@ def ingest_document_pdf(
             session.add(doc)
             session.commit()
         else:
+            session.exec(delete(Chunk).where(Chunk.document_id == doc.id))
             for page_num, chk_idx, chunk_str, vector in chunk_records_data:
                 chk = Chunk(
                     document_id=doc.id,
