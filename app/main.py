@@ -3,20 +3,30 @@
 import io
 import logging
 import os
+import re
 import zipfile
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Annotated
+from uuid import UUID, uuid4
 
+import pymupdf
 from docx import Document as DocxDocument
-from fastapi import Depends, FastAPI, File, HTTPException, UploadFile, status
+from fastapi import (
+    BackgroundTasks,
+    Depends,
+    FastAPI,
+    File,
+    HTTPException,
+    UploadFile,
+    status,
+)
 from fastapi.responses import StreamingResponse
-from pypdf import PdfReader
-from pypdf.errors import PdfReadError
 from sqlmodel import Session, select
 
 from app.db import get_session
 from app.extractor import extract_resume_data
+from app.ingestion import ingest_document_pdf
 from app.llm import (
     LLMError,
     LLMRateLimitError,
@@ -26,8 +36,11 @@ from app.llm import (
 )
 from app.models import (
     AskRequest,
+    Chunk,
+    ChunkResponse,
     Document,
     DocumentResponse,
+    DocumentStatus,
     ErrorResponse,
     ExtractRequest,
     HealthResponse,
@@ -43,6 +56,7 @@ MAX_FILE_SIZE_BYTES: int = int(
 )  # 10 MB limit
 CHUNK_SIZE_BYTES: int = 1024 * 1024  # 1 MB read chunk size
 ALLOWED_EXTENSIONS: set[str] = {".pdf", ".txt", ".docx"}
+UPLOAD_DIR: Path = Path(os.getenv("UPLOAD_DIR", "uploads"))
 
 app = FastAPI(
     title="AI Document Assistant",
@@ -79,22 +93,16 @@ def validate_file_content(content: bytes, extension: str) -> None:
                 detail="Corrupted file: unable to decode text file contents.",
             )
 
-    # 2. PDF validation via pypdf (.pdf)
+    # 2. PDF validation via PyMuPDF (.pdf)
     elif extension == ".pdf":
         try:
-            pdf = PdfReader(io.BytesIO(content))
-            if len(pdf.pages) == 0:
+            doc = pymupdf.open(stream=content, filetype="pdf")
+            if len(doc) == 0:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="The uploaded PDF contains no extractable text.",
                 )
-            has_text = any((page.extract_text() or "").strip() for page in pdf.pages)
-            has_images = any(len(page.images) > 0 for page in pdf.pages)
-        except (PdfReadError, EOFError):
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="The uploaded PDF is invalid or unreadable.",
-            )
+            has_text = any(bool(page.get_text("text").strip()) for page in doc)
         except HTTPException:
             raise
         except Exception:
@@ -102,8 +110,11 @@ def validate_file_content(content: bytes, extension: str) -> None:
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="The uploaded PDF is invalid or unreadable.",
             )
+        finally:
+            if "doc" in locals() and not doc.is_closed:
+                doc.close()
 
-        if not has_text and not has_images:
+        if not has_text:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="The uploaded PDF contains no extractable text.",
@@ -179,8 +190,9 @@ async def upload_document(
         File(description="Document file to upload (.pdf, .txt, .docx)"),
     ],
     session: Annotated[Session, Depends(get_session)],
+    background_tasks: BackgroundTasks,
 ) -> Document:
-    """Validate uploaded document and record metadata in PostgreSQL."""
+    """Validate uploaded document, save to disk, and trigger background ingestion."""
     filename = file.filename or ""
     extension = Path(filename).suffix.lower()
 
@@ -237,15 +249,76 @@ async def upload_document(
     # 6. Extract content type with fallback
     content_type = file.content_type or "application/octet-stream"
 
-    # 7. Create and persist Document model to database
-    doc_record = Document(
-        filename=filename,
-        content_type=content_type,
-        size_bytes=size_bytes,
+    # 7. Initial status: pending for PDF (background ingestion), ready for others
+    initial_status = (
+        DocumentStatus.PENDING if extension == ".pdf" else DocumentStatus.READY
     )
-    session.add(doc_record)
-    session.commit()
-    session.refresh(doc_record)
+
+    # 8. Generate document UUID upfront to bind file path and database record
+    doc_id = uuid4()
+
+    # 9. Sanitize target file path and verify directory containment
+    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    raw_name = Path(filename).name
+    safe_name = re.sub(r"[^a-zA-Z0-9_.-]", "_", raw_name)
+    if not safe_name or safe_name.replace(".", "") == "":
+        safe_name = f"document{extension}"
+
+    destination = (UPLOAD_DIR / f"{doc_id}_{safe_name}").resolve()
+    if not destination.is_relative_to(UPLOAD_DIR.resolve()):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid filename path traversal attempt.",
+        )
+
+    # 10. Write uploaded content atomically via temporary file
+    temp_destination = (UPLOAD_DIR / f"tmp_{doc_id}_{safe_name}").resolve()
+    try:
+        temp_destination.write_bytes(content)
+        temp_destination.replace(destination)
+    except Exception as exc:
+        if temp_destination.exists():
+            temp_destination.unlink(missing_ok=True)
+        if destination.exists():
+            destination.unlink(missing_ok=True)
+        logger.error("Failed saving uploaded file to disk: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed saving uploaded file: {exc}",
+        ) from exc
+
+    # 11. Persist Document to database with compensating cleanup on DB failure
+    try:
+        doc_record = Document(
+            id=doc_id,
+            filename=filename,
+            content_type=content_type,
+            size_bytes=size_bytes,
+            status=initial_status,
+            file_path=str(destination),
+        )
+        session.add(doc_record)
+        session.commit()
+        session.refresh(doc_record)
+    except Exception as exc:
+        session.rollback()
+        # Compensating cleanup: remove the file from filesystem if DB commit fails
+        if destination.exists():
+            destination.unlink(missing_ok=True)
+        logger.error(
+            "Database transaction failed for document %s, cleaned up file: %s",
+            doc_id,
+            exc,
+        )
+        raise
+
+    # 12. Schedule background ingestion for PDFs
+    if extension == ".pdf":
+        background_tasks.add_task(
+            ingest_document_pdf,
+            document_id=doc_record.id,
+            file_path=str(destination),
+        )
 
     return doc_record
 
@@ -258,13 +331,64 @@ async def upload_document(
     description="Retrieve metadata for all uploaded documents stored in PostgreSQL.",
     tags=["Documents"],
 )
-async def list_documents(
+def list_documents(
     session: Annotated[Session, Depends(get_session)],
 ) -> list[Document]:
     """Return all stored document metadata records from PostgreSQL."""
     statement = select(Document).order_by(Document.uploaded_at)
     documents = session.exec(statement).all()
     return list(documents)
+
+
+@app.get(
+    "/documents/{document_id}",
+    response_model=DocumentResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Get Document Details",
+    description="Retrieve metadata and ingestion status for a single document.",
+    tags=["Documents"],
+)
+def get_document(
+    document_id: UUID,
+    session: Annotated[Session, Depends(get_session)],
+) -> Document:
+    """Retrieve document metadata and current ingestion status by ID."""
+    doc = session.get(Document, document_id)
+    if not doc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Document '{document_id}' not found.",
+        )
+    return doc
+
+
+@app.get(
+    "/documents/{document_id}/chunks",
+    response_model=list[ChunkResponse],
+    status_code=status.HTTP_200_OK,
+    summary="Get Document Chunks",
+    description="Retrieve all text chunks generated for an ingested document.",
+    tags=["Documents"],
+)
+def get_document_chunks(
+    document_id: UUID,
+    session: Annotated[Session, Depends(get_session)],
+) -> list[Chunk]:
+    """Retrieve generated text chunks for an ingested document."""
+    doc = session.get(Document, document_id)
+    if not doc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Document '{document_id}' not found.",
+        )
+
+    statement = (
+        select(Chunk)
+        .where(Chunk.document_id == document_id)
+        .order_by(Chunk.chunk_index)
+    )
+    chunks = session.exec(statement).all()
+    return list(chunks)
 
 
 @app.post(

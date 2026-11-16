@@ -18,6 +18,8 @@ dependencies = [
     "httpx>=0.28.1",
     "google-genai>=2.34.0",
     "groq>=1.7.0",
+    "pymupdf>=2.1",
+    "pgvector>=0.5.1",
 ]
 
 [dependency-groups]

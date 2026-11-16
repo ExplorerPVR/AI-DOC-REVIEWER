@@ -1,13 +1,36 @@
 """SQLModel database models and Pydantic schemas for AI Document Assistant."""
 
 from datetime import datetime, timezone
+from enum import Enum
 from typing import Any
 from uuid import UUID, uuid4
 
+import sqlalchemy as sa
+from pgvector.sqlalchemy import Vector
 from pydantic import BaseModel, field_validator
 from pydantic import Field as PydanticField
+from sqlalchemy import Column
 from sqlmodel import Field as SQLModelField
 from sqlmodel import SQLModel
+
+
+class DocumentStatus(str, Enum):
+    """Lifecycle status of a document."""
+
+    PENDING = "pending"
+    PROCESSING = "processing"
+    READY = "ready"
+    FAILED = "failed"
+
+    @classmethod
+    def _missing_(cls, value: object):
+        """Case-insensitive fallback for string values and enum names."""
+        if isinstance(value, str):
+            val_lower = value.lower()
+            for member in cls:
+                if member.value == val_lower or member.name.lower() == val_lower:
+                    return member
+        return None
 
 
 class HealthResponse(BaseModel):
@@ -34,6 +57,12 @@ class DocumentBase(SQLModel):
         description="Total size of the document in bytes",
         ge=1,
     )
+    status: DocumentStatus = SQLModelField(
+        default=DocumentStatus.PENDING,
+        sa_type=sa.String(),
+        index=True,
+        description="Document ingestion and processing status",
+    )
 
 
 class Document(DocumentBase, table=True):
@@ -51,6 +80,14 @@ class Document(DocumentBase, table=True):
         default_factory=lambda: datetime.now(timezone.utc),
         description="Timestamp in UTC recording when the document was received",
     )
+    error_message: str | None = SQLModelField(
+        default=None,
+        description="Detailed error message if processing failed",
+    )
+    file_path: str | None = SQLModelField(
+        default=None,
+        description="Disk path to the saved uploaded file",
+    )
 
 
 class DocumentResponse(DocumentBase):
@@ -62,6 +99,63 @@ class DocumentResponse(DocumentBase):
     uploaded_at: datetime = SQLModelField(
         description="Timestamp in UTC recording when the document was received",
     )
+    error_message: str | None = SQLModelField(
+        default=None,
+        description="Detailed error message if processing failed",
+    )
+
+
+class ChunkBase(SQLModel):
+    """Base schema holding common chunk fields."""
+
+    document_id: UUID = SQLModelField(
+        foreign_key="documents.id",
+        index=True,
+        ondelete="CASCADE",
+        description="Parent Document UUID reference",
+    )
+    filename: str = SQLModelField(
+        index=True,
+        description="Source document file name",
+    )
+    page_number: int = SQLModelField(
+        description="1-based page number from the PDF document",
+    )
+    chunk_index: int = SQLModelField(
+        default=0,
+        description="0-based sequence index of the chunk",
+    )
+    text: str = SQLModelField(
+        description="Clean text content extracted for this chunk",
+    )
+
+
+class Chunk(ChunkBase, table=True):
+    """SQLModel database table model for chunked document text and vector embeddings."""
+
+    __tablename__ = "chunks"
+
+    id: UUID = SQLModelField(
+        default_factory=uuid4,
+        primary_key=True,
+        index=True,
+        description="Unique UUID primary key for the chunk",
+    )
+    embedding: list[float] = SQLModelField(
+        sa_column=Column(Vector(768), nullable=False),
+        description="768-dimensional dense vector embedding",
+    )
+    created_at: datetime = SQLModelField(
+        default_factory=lambda: datetime.now(timezone.utc),
+        description="Timestamp in UTC recording when the chunk was generated",
+    )
+
+
+class ChunkResponse(ChunkBase):
+    """Response schema returned upon chunk retrieval."""
+
+    id: UUID
+    created_at: datetime
 
 
 class LLMCallBase(SQLModel):
