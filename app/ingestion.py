@@ -170,16 +170,23 @@ def chunk_text(
 
         # Look for a natural split boundary in the tail window of the chunk
         if end < text_len:
-            search_start = max(start + chunk_size - 250, start)
+            search_start = max(start + int(chunk_size * 0.6), start)
             best_break = -1
             # Prioritize paragraph/citation breaks and sentences over newlines
-            for sep in ["\n\n", ". ", "? ", "! ", "; ", "\n", ", ", " "]:
+            for sep in ["\n\n", ". ", "? ", "! ", "; ", "\n"]:
                 pos = cleaned.rfind(sep, search_start, end)
                 if pos != -1:
                     best_break = pos + len(sep)
                     break
-            if best_break != -1 and best_break > start + 300:
+            if best_break != -1 and best_break > start + int(chunk_size * 0.4):
                 end = best_break
+            else:
+                # Snap backward to nearest whitespace so chunk never ends mid-word
+                space_pos = cleaned.rfind(" ", search_start, end)
+                if space_pos == -1:
+                    space_pos = cleaned.rfind(" ", start + 1, end)
+                if space_pos != -1 and space_pos > start:
+                    end = space_pos
 
         chunk_str = cleaned[start:end].strip()
         if chunk_str:
@@ -192,10 +199,12 @@ def chunk_text(
         raw_start = max(end - chunk_overlap, start + 1)
         if raw_start < text_len:
             boundary_pos = -1
-            # Search backward first (up to 150 chars) to capture complete unit
+            # Search backward first (up to chunk_overlap chars) to capture complete unit
             for boundary in ["\n\n[", "\n\n", ". "]:
                 p = cleaned.rfind(
-                    boundary, max(start + 1, raw_start - 150), min(raw_start + 60, end)
+                    boundary,
+                    max(start + 1, raw_start - chunk_overlap),
+                    min(raw_start + 60, end),
                 )
                 if p != -1:
                     boundary_pos = (
@@ -206,9 +215,14 @@ def chunk_text(
             if boundary_pos != -1 and start < boundary_pos < end:
                 start = boundary_pos
             else:
-                space_pos = cleaned.find(" ", raw_start, min(raw_start + 40, end))
-                if space_pos != -1 and space_pos + 1 < end:
-                    start = space_pos + 1
+                # Fallback: snap cleanly to start of a whole word
+                if raw_start > start and cleaned[raw_start - 1] not in " \n\t":
+                    prev_space = cleaned.rfind(" ", start, raw_start)
+                    if prev_space != -1:
+                        start = prev_space + 1
+                    else:
+                        next_space = cleaned.find(" ", raw_start, end)
+                        start = next_space + 1 if next_space != -1 else raw_start
                 else:
                     start = raw_start
         else:

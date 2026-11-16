@@ -136,13 +136,26 @@ def test_chunk_text_splits_with_overlap():
 
 
 def test_chunk_text_overlap_snaps_to_words():
-    """Verify chunk overlap does not break words in half."""
+    """Verify chunking snaps cleanly to word boundaries without splitting any token."""
     words = [f"token{i}" for i in range(250)]
+    words_set = set(words)
     text = " ".join(words)
     chunks = chunk_text(text, chunk_size=300, chunk_overlap=80)
-    for chk in chunks:
-        first_word = chk.split()[0]
-        assert first_word in words
+
+    assert len(chunks) >= 3
+
+    # 1. Validate EVERY token in each chunk belongs to the original word list
+    for idx, chk in enumerate(chunks):
+        chk_tokens = chk.split()
+        assert len(chk_tokens) > 0, f"Chunk {idx} is empty"
+        assert chk_tokens[0] in words_set, f"First token invalid in chunk {idx}"
+        assert chk_tokens[-1] in words_set, f"Last token invalid in chunk {idx}"
+        for token in chk_tokens:
+            assert token in words_set, f"Partially split token {token} in chunk {idx}"
+
+    # 2. Verify chunks collectively preserve all original words (no words lost)
+    extracted_words = {token for chk in chunks for token in chk.split()}
+    assert extracted_words == words_set, f"Missing words: {words_set - extracted_words}"
 
 
 def test_clean_pdf_text_dehyphenation_and_citations():
