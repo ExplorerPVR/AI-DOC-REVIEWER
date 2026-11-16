@@ -8,7 +8,7 @@ import zipfile
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Annotated
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pymupdf
 from docx import Document as DocxDocument
@@ -254,38 +254,65 @@ async def upload_document(
         DocumentStatus.PENDING if extension == ".pdf" else DocumentStatus.READY
     )
 
-    # 8. Create and persist Document model to database
-    doc_record = Document(
-        filename=filename,
-        content_type=content_type,
-        size_bytes=size_bytes,
-        status=initial_status,
-    )
-    session.add(doc_record)
-    session.commit()
-    session.refresh(doc_record)
+    # 8. Generate document UUID upfront to bind file path and database record
+    doc_id = uuid4()
 
-    # 9. Save uploaded file to disk with path traversal sanitization
+    # 9. Sanitize target file path and verify directory containment
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     raw_name = Path(filename).name
     safe_name = re.sub(r"[^a-zA-Z0-9_.-]", "_", raw_name)
     if not safe_name or safe_name.replace(".", "") == "":
         safe_name = f"document{extension}"
 
-    destination = (UPLOAD_DIR / f"{doc_record.id}_{safe_name}").resolve()
+    destination = (UPLOAD_DIR / f"{doc_id}_{safe_name}").resolve()
     if not destination.is_relative_to(UPLOAD_DIR.resolve()):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Invalid filename path traversal attempt.",
         )
-    destination.write_bytes(content)
 
-    doc_record.file_path = str(destination)
-    session.add(doc_record)
-    session.commit()
-    session.refresh(doc_record)
+    # 10. Write uploaded content atomically via temporary file
+    temp_destination = (UPLOAD_DIR / f"tmp_{doc_id}_{safe_name}").resolve()
+    try:
+        temp_destination.write_bytes(content)
+        temp_destination.replace(destination)
+    except Exception as exc:
+        if temp_destination.exists():
+            temp_destination.unlink(missing_ok=True)
+        if destination.exists():
+            destination.unlink(missing_ok=True)
+        logger.error("Failed saving uploaded file to disk: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed saving uploaded file: {exc}",
+        ) from exc
 
-    # 10. Schedule background ingestion for PDFs
+    # 11. Persist Document to database with compensating cleanup on DB failure
+    try:
+        doc_record = Document(
+            id=doc_id,
+            filename=filename,
+            content_type=content_type,
+            size_bytes=size_bytes,
+            status=initial_status,
+            file_path=str(destination),
+        )
+        session.add(doc_record)
+        session.commit()
+        session.refresh(doc_record)
+    except Exception as exc:
+        session.rollback()
+        # Compensating cleanup: remove the file from filesystem if DB commit fails
+        if destination.exists():
+            destination.unlink(missing_ok=True)
+        logger.error(
+            "Database transaction failed for document %s, cleaned up file: %s",
+            doc_id,
+            exc,
+        )
+        raise
+
+    # 12. Schedule background ingestion for PDFs
     if extension == ".pdf":
         background_tasks.add_task(
             ingest_document_pdf,

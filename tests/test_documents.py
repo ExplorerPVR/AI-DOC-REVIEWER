@@ -3,6 +3,7 @@
 import io
 import uuid
 from collections.abc import Generator
+from pathlib import Path
 
 import pytest
 from docx import Document as DocxDocument
@@ -316,3 +317,56 @@ def test_upload_duplicate_filename_rejected(client: TestClient):
     res2 = client.post("/documents", files=files_dup)
     assert res2.status_code == 409
     assert res2.json()["detail"] == "A document with this filename already exists."
+
+
+def test_upload_file_write_failure_leaves_no_db_record(
+    client: TestClient, session: Session, monkeypatch: pytest.MonkeyPatch
+):
+    """Verify failed file write returns 500 and creates no DB record."""
+
+    def fail_write(*args, **kwargs):
+        raise OSError("Disk full error simulation")
+
+    monkeypatch.setattr("pathlib.Path.write_bytes", fail_write)
+
+    files = {"file": ("fail_write.txt", b"Test file write failure", "text/plain")}
+    res = client.post("/documents", files=files)
+    assert res.status_code == 500
+    assert "Disk full error simulation" in res.json()["detail"]
+
+    # Verify no record was inserted into database
+    existing = session.exec(
+        select(Document).where(Document.filename == "fail_write.txt")
+    ).first()
+    assert existing is None
+
+    # Undo failure simulation and verify re-upload with same name succeeds without 409
+    monkeypatch.undo()
+    res_retry = client.post("/documents", files=files)
+    assert res_retry.status_code == 201
+
+
+def test_upload_db_failure_cleans_up_file(
+    client: TestClient,
+    session: Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Verify failed database commit removes uploaded file via compensating cleanup."""
+    uploads_dir = tmp_path / "comp_uploads"
+    monkeypatch.setattr("app.main.UPLOAD_DIR", uploads_dir)
+
+    def fail_commit():
+        raise RuntimeError("Simulated DB commit error")
+
+    monkeypatch.setattr(session, "commit", fail_commit)
+
+    files = {
+        "file": ("fail_db.txt", b"Test DB failure compensating cleanup", "text/plain")
+    }
+    with pytest.raises(RuntimeError, match="Simulated DB commit error"):
+        client.post("/documents", files=files)
+
+    # Verify compensating cleanup removed all files from disk
+    leftover_files = list(uploads_dir.glob("*fail_db.txt"))
+    assert len(leftover_files) == 0
