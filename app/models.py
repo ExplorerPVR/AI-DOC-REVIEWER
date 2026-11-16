@@ -5,6 +5,7 @@ from enum import Enum
 from typing import Any
 from uuid import UUID, uuid4
 
+import sqlalchemy as sa
 from pgvector.sqlalchemy import Vector
 from pydantic import BaseModel, field_validator
 from pydantic import Field as PydanticField
@@ -20,6 +21,16 @@ class DocumentStatus(str, Enum):
     PROCESSING = "processing"
     READY = "ready"
     FAILED = "failed"
+
+    @classmethod
+    def _missing_(cls, value: object):
+        """Case-insensitive fallback for string values and enum names."""
+        if isinstance(value, str):
+            val_lower = value.lower()
+            for member in cls:
+                if member.value == val_lower or member.name.lower() == val_lower:
+                    return member
+        return None
 
 
 class HealthResponse(BaseModel):
@@ -48,6 +59,7 @@ class DocumentBase(SQLModel):
     )
     status: DocumentStatus = SQLModelField(
         default=DocumentStatus.PENDING,
+        sa_type=sa.String(),
         index=True,
         description="Document ingestion and processing status",
     )

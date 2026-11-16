@@ -296,7 +296,7 @@ async def upload_document(
     description="Retrieve metadata for all uploaded documents stored in PostgreSQL.",
     tags=["Documents"],
 )
-async def list_documents(
+def list_documents(
     session: Annotated[Session, Depends(get_session)],
 ) -> list[Document]:
     """Return all stored document metadata records from PostgreSQL."""
