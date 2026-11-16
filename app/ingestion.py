@@ -102,6 +102,28 @@ def read_pdf_pages(file_path: str | Path) -> list[tuple[int, str]]:
         doc.close()
 
 
+def _dehyphenate_match(m: re.Match) -> str:
+    """Smartly reassemble hyphenated words split across PDF line breaks."""
+    w1, w2 = m.group(1), m.group(2)
+    # Common compound prefixes that naturally retain their hyphen in English
+    compound_prefixes = {
+        "self",
+        "multi",
+        "cross",
+        "semi",
+        "pre",
+        "post",
+        "joint",
+        "large",
+        "hand",
+        "zero",
+        "few",
+    }
+    if w1.lower() in compound_prefixes:
+        return f"{w1}-{w2}"
+    return f"{w1}{w2}"
+
+
 def clean_pdf_text(text: str) -> str:
     """Normalize PDF text by removing hyphenation and unwrapping soft linebreaks.
 
@@ -111,8 +133,8 @@ def clean_pdf_text(text: str) -> str:
     - Preserves true structural double newlines ('\\n\\n').
     """
     cleaned = text.replace("\r\n", "\n").replace("\r", "\n")
-    # Join hyphenated words broken across physical line breaks
-    cleaned = re.sub(r"(\w+)-\s*\n\s*(\w+)", r"\1-\2", cleaned)
+    # Smartly rejoin hyphenated words broken across physical line breaks
+    cleaned = re.sub(r"(\w+)-\s*\n\s*(\w+)", _dehyphenate_match, cleaned)
     # Ensure citation anchors like "\n[14]" act as block paragraphs
     cleaned = re.sub(r"(?<!\n)\n(\[\d+\])", r"\n\n\1", cleaned)
     # Replace soft single newlines within sentences with a space
