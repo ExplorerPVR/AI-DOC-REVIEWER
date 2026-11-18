@@ -405,13 +405,69 @@ Score (Lenient): 25/25 valid, 100/100 fields correct
 
 ---
 
+## 🔍 Semantic Search & Retrieval (`GET /search`)
+
+The semantic search endpoint finds the parts of ingested documents that best match a user query, forming the core Retrieval component ("R") for Retrieval-Augmented Generation (RAG).
+
+### Endpoint Specification:
+- **Route**: `GET /search?q={query}&k={count}`
+- **Parameters**:
+  - `q` (string, required): Natural language query question (`min_length=1`). Empty or whitespace-only queries return `422 Unprocessable Content`.
+  - `k` (integer, optional, default `5`): Maximum number of closest chunks to retrieve (`1 <= k <= 100`).
+- **Matching Mechanism**:
+  - Embeds the query `q` using the same dense 768-dimensional model as ingestion (Google Gemini or Ollama).
+  - Queries the PostgreSQL `chunks` table using **pgvector's `<=>` cosine distance operator**, filtered strictly to documents with `status = 'ready'`.
+  - Leverages the HNSW vector index (`ix_chunks_embedding_hnsw`) for fast nearest-neighbor lookups.
+  - Returns chunks ordered **closest first** (ascending cosine distance).
+- **Response Schema (`list[SearchResult]`)**:
+  ```json
+  [
+    {
+      "text": "MAE addressed this by masking a very high proportion of patches...",
+      "filename": "Self_Supervised_Learning_Review_Paper.pdf",
+      "page": 3,
+      "score": 0.803
+    }
+  ]
+  ```
+- **Edge Cases**:
+  - Empty or missing `q`: Returns `422 Unprocessable Content`.
+  - No documents with `status: "ready"`: Returns `[]` (empty list).
+
+---
+
+## 📈 Search Accuracy Evaluation (`scripts/eval_search.py`)
+
+A quantitative evaluation suite running 5 ground-truth questions against the ingested academic review paper (*Self-Supervised Learning Review Paper*), verifying whether the correct target page appears within the top-5 retrieved chunks.
+
+```bash
+# Run the search evaluation script
+uv run python scripts/eval_search.py
+```
+
+### 5-Question Evaluation Results:
+
+| ID | Test Question | Expected Page | Top-5 Retrieved Pages | Top Score | Result |
+| :---: | :--- | :---: | :---: | :---: | :---: |
+| **Q1** | *How does the context-free network solve jigsaw puzzles in self-supervised learning?* | **Page 2** | `[2, 3, 6, 3, 2]` | 0.797 | **PASS (Rank 1)** |
+| **Q2** | *What are Masked Autoencoders and how does patch masking scale in vision transformers?* | **Page 3** | `[3, 2, 6, 1, 3]` | 0.803 | **PASS (Rank 1)** |
+| **Q3** | *What key milestones and architectures are illustrated in the representation learning timeline?* | **Page 4** | `[4, 1, 5, 1, 1]` | 0.741 | **PASS (Rank 1)** |
+| **Q4** | *How do DINOv2 frozen features perform on semantic segmentation and monocular depth estimation?* | **Page 5** | `[5, 3, 3, 5, 6]` | 0.788 | **PASS (Rank 1)** |
+| **Q5** | *Why do latent-space predictive architectures like I-JEPA deserve further study in future directions?* | **Page 6** | `[6, 3, 6, 2, 1]` | 0.753 | **PASS (Rank 1)** |
+
+```text
+5/5 found in top 5 (100.0% accuracy, all Rank 1)
+```
+
+---
+
 ## 🤖 Continuous Integration (CI) Checks
 
 The CI pipeline runs automatically on all pushes and pull requests via GitHub Actions (`.github/workflows/ci.yml`).
 
 ### Workflow Steps:
 1. **Lint & Code Style**: Runs `uv run ruff check .` to check for style violations, unformatted imports, and common programming errors.
-2. **Automated Testing**: Runs `uv run pytest` to execute the full unit and integration test suite (58 automated tests) against the in-memory SQLite database.
+2. **Automated Testing**: Runs `uv run pytest` to execute the full unit and integration test suite (68 automated tests) against the in-memory SQLite database.
 
 ### Running CI Checks Locally:
 ```bash
