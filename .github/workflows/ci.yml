@@ -25,13 +25,10 @@ jobs:
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U postgres -d doc_assistant_test"
+          --health-cmd pg_isready
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
-
-    env:
-      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/doc_assistant_test
 
     steps:
       - name: Check out repository
@@ -53,8 +50,12 @@ jobs:
       - name: Run Ruff Check
         run: uv run ruff check .
 
-      - name: Run Database Migrations
+      - name: Run Database Migrations (pgvector)
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/doc_assistant_test
         run: uv run alembic upgrade head
 
       - name: Run Pytest Suite
-        run: uv run pytest -v
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/doc_assistant_test
+        run: uv run pytest

@@ -7,7 +7,7 @@ from collections.abc import Generator
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import text
-from sqlmodel import Session, SQLModel, create_engine
+from sqlmodel import Session, SQLModel, create_engine, delete
 from sqlmodel.pool import StaticPool
 
 import app.db as db_module
@@ -235,31 +235,23 @@ def test_search_invalid_k_rejected(client: TestClient):
     assert resp_too_large.status_code == 422
 
 
-def test_search_pgvector_postgres_integration(monkeypatch: pytest.MonkeyPatch):
-    """Integration test exercising the real PostgreSQL pgvector <=> query path.
-
-    Runs inside an uncommitted transaction that is always rolled back so no
-    test records persist in PostgreSQL. Skips cleanly if PostgreSQL/pgvector
-    is unreachable in the current environment.
-    """
-    pg_url = os.getenv("TEST_POSTGRES_URL") or os.getenv("DATABASE_URL") or ""
+def test_search_postgresql_pgvector_integration(monkeypatch: pytest.MonkeyPatch):
+    """Integration test exercising native PostgreSQL pgvector <=> cosine distance."""
+    pg_url = os.getenv("TEST_POSTGRES_URL") or os.getenv("DATABASE_URL", "")
     if not pg_url.startswith("postgresql"):
-        pytest.skip("PostgreSQL DATABASE_URL not configured.")
+        pytest.skip("PostgreSQL DATABASE_URL not configured for pgvector integration.")
 
     pg_engine = create_engine(pg_url, pool_pre_ping=True)
     try:
-        with pg_engine.connect() as probe:
-            has_vector = probe.execute(
-                text("SELECT 1 FROM pg_extension WHERE extname = 'vector'")
-            ).scalar()
-            if not has_vector:
-                pytest.skip("pgvector extension is not enabled in PostgreSQL.")
+        with pg_engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+            has_chunks = conn.execute(text("SELECT to_regclass('public.chunks')")).one()
+            if has_chunks[0] is None:
+                pytest.skip("PostgreSQL chunks table not migrated yet.")
     except Exception as exc:
         pg_engine.dispose()
         pytest.skip(f"PostgreSQL unavailable for integration test: {exc}")
 
-    # Query vector along basis dimension 0 so our synthetic chunks deterministically
-    # outrank any real dense document embeddings that may exist in the DB.
     query_vec = [1.0] + [0.0] * (EMBEDDING_DIMENSION - 1)
     monkeypatch.setattr(
         ingestion_module,
@@ -267,109 +259,108 @@ def test_search_pgvector_postgres_integration(monkeypatch: pytest.MonkeyPatch):
         lambda *args, **kwargs: query_vec,
     )
 
-    conn = pg_engine.connect()
-    tx = conn.begin()
-    pg_session = Session(bind=conn)
+    ready_doc_id = uuid.uuid4()
+    pending_doc_id = uuid.uuid4()
+    ready_filename = f"pgvector_ready_{ready_doc_id.hex[:8]}.pdf"
+    pending_filename = f"pgvector_pending_{pending_doc_id.hex[:8]}.pdf"
 
     def get_pg_session_override() -> Generator[Session, None, None]:
-        yield pg_session
+        with Session(pg_engine) as pg_session:
+            yield pg_session
 
     app.dependency_overrides[get_session] = get_pg_session_override
+
     try:
-        assert pg_session.get_bind().dialect.name == "postgresql"
-
-        ready_doc_id = uuid.uuid4()
-        ready_filename = f"pgvector_integration_{ready_doc_id.hex[:8]}.pdf"
-        pending_doc_id = uuid.uuid4()
-        pending_filename = f"pgvector_pending_{pending_doc_id.hex[:8]}.pdf"
-
-        pg_session.add(
-            Document(
+        with Session(pg_engine) as setup_session:
+            ready_doc = Document(
                 id=ready_doc_id,
                 filename=ready_filename,
                 content_type="application/pdf",
-                size_bytes=2048,
+                size_bytes=4096,
                 status=DocumentStatus.READY,
             )
-        )
-        pg_session.add(
-            Document(
+            pending_doc = Document(
                 id=pending_doc_id,
                 filename=pending_filename,
                 content_type="application/pdf",
-                size_bytes=1024,
+                size_bytes=2048,
                 status=DocumentStatus.PENDING,
             )
-        )
+            setup_session.add(ready_doc)
+            setup_session.add(pending_doc)
+            setup_session.flush()
 
-        # Flush documents first so foreign keys exist before inserting chunks
-        pg_session.flush()
+            # Exact cosine distances to [1, 0, ...]: 0.0, 0.2, 0.4
+            setup_session.add_all(
+                [
+                    Chunk(
+                        document_id=ready_doc_id,
+                        filename=ready_filename,
+                        page_number=1,
+                        chunk_index=0,
+                        text="Exact match pgvector cosine chunk.",
+                        embedding=[1.0] + [0.0] * (EMBEDDING_DIMENSION - 1),
+                    ),
+                    Chunk(
+                        document_id=ready_doc_id,
+                        filename=ready_filename,
+                        page_number=2,
+                        chunk_index=1,
+                        text="Second closest pgvector cosine chunk.",
+                        embedding=[0.8, 0.6] + [0.0] * (EMBEDDING_DIMENSION - 2),
+                    ),
+                    Chunk(
+                        document_id=ready_doc_id,
+                        filename=ready_filename,
+                        page_number=3,
+                        chunk_index=2,
+                        text="Third closest pgvector cosine chunk.",
+                        embedding=[0.6, 0.8] + [0.0] * (EMBEDDING_DIMENSION - 2),
+                    ),
+                    # Identical vector but PENDING document: must be filtered out
+                    Chunk(
+                        document_id=pending_doc_id,
+                        filename=pending_filename,
+                        page_number=99,
+                        chunk_index=0,
+                        text="Unready document chunk that must not appear.",
+                        embedding=[1.0] + [0.0] * (EMBEDDING_DIMENSION - 1),
+                    ),
+                ]
+            )
+            setup_session.commit()
 
-        # Three READY chunks with known cosine similarities: 1.0, 0.95, 0.80
-        pg_session.add_all(
-            [
-                Chunk(
-                    document_id=ready_doc_id,
-                    filename=ready_filename,
-                    page_number=3,
-                    chunk_index=0,
-                    text="Third closest pgvector chunk (cosine similarity 0.80).",
-                    embedding=[0.8, 0.6] + [0.0] * (EMBEDDING_DIMENSION - 2),
-                ),
-                Chunk(
-                    document_id=ready_doc_id,
-                    filename=ready_filename,
-                    page_number=1,
-                    chunk_index=1,
-                    text="Exact match pgvector chunk (cosine similarity 1.00).",
-                    embedding=[1.0, 0.0] + [0.0] * (EMBEDDING_DIMENSION - 2),
-                ),
-                Chunk(
-                    document_id=ready_doc_id,
-                    filename=ready_filename,
-                    page_number=2,
-                    chunk_index=2,
-                    text="Second closest pgvector chunk (cosine similarity 0.95).",
-                    embedding=[0.95, 0.3122499] + [0.0] * (EMBEDDING_DIMENSION - 2),
-                ),
-                # Identical vector on a PENDING doc: must be excluded by WHERE READY
-                Chunk(
-                    document_id=pending_doc_id,
-                    filename=pending_filename,
-                    page_number=99,
-                    chunk_index=0,
-                    text="Pending document chunk that must never appear in search.",
-                    embedding=[1.0, 0.0] + [0.0] * (EMBEDDING_DIMENSION - 2),
-                ),
-            ]
-        )
-        pg_session.flush()
-
-        pg_client = TestClient(app)
-        resp = pg_client.get("/search?q=pgvector%20cosine%20distance&k=3")
+        client = TestClient(app)
+        resp = client.get("/search?q=pgvector%20cosine%20distance&k=3")
         assert resp.status_code == 200
         results = resp.json()
 
         assert len(results) == 3
+        assert all(item["filename"] != pending_filename for item in results)
 
-        # Verify closest-first ordering computed natively by pgvector <=> operator
         assert results[0]["filename"] == ready_filename
         assert results[0]["page"] == 1
-        assert results[0]["score"] == pytest.approx(1.0, abs=1e-4)
+        assert results[0]["score"] == 1.0
 
         assert results[1]["filename"] == ready_filename
         assert results[1]["page"] == 2
-        assert results[1]["score"] == pytest.approx(0.95, abs=1e-3)
+        assert results[1]["score"] == 0.8
 
         assert results[2]["filename"] == ready_filename
         assert results[2]["page"] == 3
-        assert results[2]["score"] == pytest.approx(0.8, abs=1e-3)
-
-        assert results[0]["score"] > results[1]["score"] > results[2]["score"]
-        assert all(item["filename"] != pending_filename for item in results)
+        assert results[2]["score"] == 0.6
     finally:
-        app.dependency_overrides.pop(get_session, None)
-        pg_session.close()
-        tx.rollback()
-        conn.close()
+        app.dependency_overrides.clear()
+        with Session(pg_engine) as cleanup_session:
+            cleanup_session.exec(
+                delete(Chunk).where(
+                    Chunk.document_id.in_([ready_doc_id, pending_doc_id])
+                )
+            )
+            cleanup_session.exec(
+                delete(Document).where(
+                    Document.id.in_([ready_doc_id, pending_doc_id])
+                )
+            )
+            cleanup_session.commit()
         pg_engine.dispose()
