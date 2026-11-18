@@ -10,7 +10,7 @@ from uuid import UUID
 
 import httpx
 import pymupdf
-from sqlmodel import Session, delete, func, select
+from sqlmodel import Session, delete, select
 
 import app.db as db_module
 from app.llm import retry
@@ -475,8 +475,9 @@ def search_chunks(
 ) -> list[SearchResult]:
     """Search ingested document chunks by semantic cosine distance using pgvector.
 
-    1. Embeds query using the configured embedding model.
-    2. If no documents are in READY status, returns an empty list [].
+    1. If no documents are in READY status, returns an empty list [] immediately
+       without invoking the embedding model.
+    2. Embeds query using the configured embedding model.
     3. Searches Chunk table using pgvector cosine distance (<=> operator),
        joined to Document where status is READY.
     4. Returns up to k closest chunks sorted by cosine distance ascending.
@@ -484,21 +485,28 @@ def search_chunks(
     if not query or not query.strip():
         return []
 
+    own_session = session is None
+
+    # Short-circuit before calling embedding API if no READY documents exist
+    ready_stmt = (
+        select(Document.id)
+        .where(Document.status == DocumentStatus.READY)
+        .limit(1)
+    )
+    if own_session:
+        with Session(db_module.engine) as check_session:
+            has_ready_doc = check_session.exec(ready_stmt).first() is not None
+    else:
+        has_ready_doc = session.exec(ready_stmt).first() is not None
+
+    if not has_ready_doc:
+        return []
+
     query_vector = generate_embedding(query.strip(), provider=embedding_provider)
 
-    own_session = session is None
     s = Session(db_module.engine) if own_session else session
 
     try:
-        # Check if any documents are in READY status
-        ready_count = s.exec(
-            select(func.count(Document.id)).where(
-                Document.status == DocumentStatus.READY
-            )
-        ).one()
-        if ready_count == 0:
-            return []
-
         dialect_name = s.get_bind().dialect.name
         if dialect_name == "postgresql":
             # Native pgvector cosine distance (<=> operator)

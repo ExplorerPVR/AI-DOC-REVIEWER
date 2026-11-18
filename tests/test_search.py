@@ -76,9 +76,17 @@ def test_search_empty_query_returns_422(client: TestClient):
 
 
 def test_search_no_documents_ready_returns_empty_list(
-    client: TestClient, session: Session
+    client: TestClient, session: Session, monkeypatch: pytest.MonkeyPatch
 ):
-    """Verify GET /search returns empty list [] when no documents are READY."""
+    """Verify GET /search returns [] and skips embedding when no docs are READY."""
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError(
+            "generate_embedding should not be called without READY docs"
+        )
+
+    monkeypatch.setattr(ingestion_module, "generate_embedding", fail_if_called)
+
     # 1. Zero documents in DB
     resp = client.get("/search?q=attention%20mechanisms")
     assert resp.status_code == 200
