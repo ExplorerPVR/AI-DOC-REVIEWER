@@ -235,17 +235,23 @@ class LLMCallResponse(LLMCallBase):
 
 
 class AskRequest(BaseModel):
-    """Request payload schema for the POST /ask endpoint."""
+    """Request payload schema for the POST /ask RAG endpoint."""
 
     question: str = PydanticField(
         min_length=1,
-        description="Question or prompt to submit to the LLM",
-        examples=["Explain what a database index does in 2 sentences."],
+        description="Question to answer strictly from uploaded documents",
+        examples=["How do Masked Autoencoders scale with vision transformers?"],
     )
     provider: str = PydanticField(
         default="gemini",
         description="Target LLM provider (gemini, groq, or ollama)",
         examples=["gemini"],
+    )
+    k: int = PydanticField(
+        default=5,
+        ge=1,
+        le=20,
+        description="Number of closest document chunks to retrieve for RAG context",
     )
 
 

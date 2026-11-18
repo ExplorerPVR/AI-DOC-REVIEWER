@@ -9,6 +9,7 @@ from sqlmodel import Session, SQLModel, create_engine, select
 from sqlmodel.pool import StaticPool
 
 import app.llm as llm_module
+import app.main as main_module
 from app.db import get_session
 from app.llm import (
     LLMRateLimitError,
@@ -16,8 +17,14 @@ from app.llm import (
     estimate_tokens,
 )
 from app.main import app
-from app.models import LLMCall
+from app.models import LLMCall, SearchResult
 from app.pricing import DEFAULT_MODELS, calculate_cost, get_model_price
+from app.rag import (
+    build_rag_prompt,
+    filter_relevant_chunks,
+    format_sources_footer,
+    is_refusal_answer,
+)
 
 # Isolated in-memory SQLite engine for LLM tests
 test_engine = create_engine(
@@ -36,9 +43,21 @@ def session_fixture() -> Generator[Session, None, None]:
     SQLModel.metadata.drop_all(test_engine)
 
 
+DEFAULT_MOCK_SEARCH_RESULTS = [
+    SearchResult(
+        text="Relevant document excerpt explaining the topic in detail.",
+        filename="guide.pdf",
+        page=2,
+        score=0.88,
+    )
+]
+
+
 @pytest.fixture(name="client")
-def client_fixture(session: Session) -> Generator[TestClient, None, None]:
-    """Provide TestClient with database session dependency overridden."""
+def client_fixture(
+    session: Session, monkeypatch: pytest.MonkeyPatch
+) -> Generator[TestClient, None, None]:
+    """Provide TestClient with DB session and default RAG retrieval mocked."""
 
     def get_session_override() -> Generator[Session, None, None]:
         yield session
@@ -46,6 +65,12 @@ def client_fixture(session: Session) -> Generator[TestClient, None, None]:
     app.dependency_overrides[get_session] = get_session_override
     original_engine = llm_module.engine
     llm_module.engine = test_engine
+
+    monkeypatch.setattr(
+        main_module,
+        "search_chunks",
+        lambda *args, **kwargs: DEFAULT_MOCK_SEARCH_RESULTS,
+    )
 
     client = TestClient(app)
     yield client
@@ -118,7 +143,8 @@ def test_ask_gemini_streaming_success(
 
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/plain")
-    assert response.text == "".join(mock_chunks)
+    assert "".join(mock_chunks) in response.text
+    assert "guide.pdf (page 2)" in response.text
 
     # Verify LLMCall row recorded in database
     calls = session.exec(select(LLMCall)).all()
@@ -154,7 +180,8 @@ def test_ask_groq_streaming_success(
     response = client.post("/ask", json=payload)
 
     assert response.status_code == 200
-    assert response.text == "".join(mock_chunks)
+    assert "".join(mock_chunks) in response.text
+    assert "guide.pdf (page 2)" in response.text
 
     calls = session.exec(select(LLMCall).where(LLMCall.provider == "groq")).all()
     assert len(calls) == 1
@@ -186,7 +213,8 @@ def test_ask_ollama_streaming_success(
     response = client.post("/ask", json=payload)
 
     assert response.status_code == 200
-    assert response.text == "".join(mock_chunks)
+    assert "".join(mock_chunks) in response.text
+    assert "guide.pdf (page 2)" in response.text
 
     calls = session.exec(select(LLMCall).where(LLMCall.provider == "ollama")).all()
     assert len(calls) == 1
@@ -417,3 +445,191 @@ def test_record_llm_call_raises_database_error():
 
     assert "Failed to record LLMCall metric in database" in str(exc_info.value)
     mock_session.rollback.assert_called_once()
+
+
+def test_rag_helpers_filter_prompt_and_deduplicate_sources():
+    """Verify RAG helper functions filter low scores, format prompt, and dedupe."""
+    results = [
+        SearchResult(text="Chunk A", filename="paper.pdf", page=3, score=0.82),
+        SearchResult(text="Chunk B", filename="paper.pdf", page=3, score=0.71),
+        SearchResult(text="Chunk C", filename="notes.pdf", page=1, score=0.55),
+        SearchResult(text="Noise", filename="other.pdf", page=9, score=0.12),
+    ]
+
+    filtered = filter_relevant_chunks(results, min_score=0.35)
+    assert len(filtered) == 3
+    assert all(r.filename != "other.pdf" for r in filtered)
+
+    prompt = build_rag_prompt("What is Chunk A?", filtered)
+    assert "ONLY using the document excerpts" in prompt
+    assert "[Source 1 | File: paper.pdf | Page: 3]" in prompt
+    assert "Chunk A" in prompt
+    assert "What is Chunk A?" in prompt
+    # Fixed rules must appear before untrusted document context and question
+    assert (
+        prompt.index("Rules:")
+        < prompt.index("<context>\n")
+        < prompt.index("<question>\n")
+    )
+
+    footer = format_sources_footer(filtered)
+    assert footer == "\n\nSources:\n- paper.pdf (page 3)\n- notes.pdf (page 1)"
+
+    assert is_refusal_answer("I don't know.") is True
+    assert is_refusal_answer("  I do not know based on the context.") is True
+    assert is_refusal_answer("MAE masks 75% of patches [paper.pdf, p. 3].") is False
+
+
+def test_ask_rag_injects_context_and_cites_file_and_page(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Verify /ask injects retrieved chunks into LLM prompt and returns citations."""
+    retrieved = [
+        SearchResult(
+            text="MAE masks 75% of image patches during pretraining.",
+            filename="ssl_paper.pdf",
+            page=3,
+            score=0.85,
+        ),
+        SearchResult(
+            text="Second chunk on the same page.",
+            filename="ssl_paper.pdf",
+            page=3,
+            score=0.72,
+        ),
+        SearchResult(
+            text="Context-free network solves jigsaw puzzles.",
+            filename="ssl_paper.pdf",
+            page=2,
+            score=0.61,
+        ),
+    ]
+    captured_prompt = {}
+
+    monkeypatch.setattr(
+        main_module,
+        "search_chunks",
+        lambda *args, **kwargs: retrieved,
+    )
+
+    def mock_stream_gemini(
+        prompt: str,
+        model: str,
+        timeout: float = 30.0,
+    ) -> Iterator[str]:
+        captured_prompt["value"] = prompt
+        yield "MAE masks 75% of image patches [ssl_paper.pdf, p. 3]."
+
+    monkeypatch.setattr(llm_module, "_stream_gemini", mock_stream_gemini)
+
+    resp = client.post(
+        "/ask",
+        json={"question": "How does MAE work?", "provider": "gemini", "k": 3},
+    )
+    assert resp.status_code == 200
+    assert "MAE masks 75% of image patches [ssl_paper.pdf, p. 3]." in resp.text
+    assert "Sources:\n- ssl_paper.pdf (page 3)\n- ssl_paper.pdf (page 2)" in resp.text
+
+    # Prompt passed to LLM must include grounding rules, context chunks, and metadata
+    assert "File: ssl_paper.pdf | Page: 3" in captured_prompt["value"]
+    assert "MAE masks 75% of image patches during pretraining." in (
+        captured_prompt["value"]
+    )
+
+
+def test_ask_returns_i_dont_know_when_no_documents_ready(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Verify /ask returns 'I don't know' without calling LLM when search is empty."""
+    monkeypatch.setattr(main_module, "search_chunks", lambda *args, **kwargs: [])
+
+    def fail_if_llm_called(*args, **kwargs):
+        raise AssertionError("LLM must not be called when no documents are ready")
+
+    monkeypatch.setattr(llm_module, "_stream_gemini", fail_if_llm_called)
+
+    resp = client.post(
+        "/ask",
+        json={"question": "Who won the 2022 World Cup?", "provider": "gemini"},
+    )
+    assert resp.status_code == 200
+    assert "i don't know" in resp.text.lower()
+    assert "Sources:" not in resp.text
+
+
+def test_ask_returns_i_dont_know_when_chunks_below_relevance_threshold(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Verify /ask refuses without calling LLM when retrieved chunks are irrelevant."""
+    low_score_results = [
+        SearchResult(
+            text="Unrelated paragraph about vision transformers.",
+            filename="ssl_paper.pdf",
+            page=1,
+            score=0.18,
+        )
+    ]
+    monkeypatch.setattr(
+        main_module,
+        "search_chunks",
+        lambda *args, **kwargs: low_score_results,
+    )
+
+    def fail_if_llm_called(*args, **kwargs):
+        raise AssertionError("LLM must not be called when all chunks are irrelevant")
+
+    monkeypatch.setattr(llm_module, "_stream_gemini", fail_if_llm_called)
+
+    resp = client.post(
+        "/ask",
+        json={"question": "What is the recipe for tiramisu?", "provider": "gemini"},
+    )
+    assert resp.status_code == 200
+    assert "i don't know" in resp.text.lower()
+    assert "Sources:" not in resp.text
+
+
+def test_ask_suppresses_sources_when_llm_refuses_with_i_dont_know(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Verify /ask omits Sources footer when LLM answers 'I don't know'."""
+
+    def mock_refusal(
+        prompt: str,
+        model: str,
+        timeout: float = 30.0,
+    ) -> Iterator[str]:
+        yield "I don't know."
+
+    monkeypatch.setattr(llm_module, "_stream_gemini", mock_refusal)
+
+    resp = client.post(
+        "/ask",
+        json={"question": "What is the exact GPU price?", "provider": "gemini"},
+    )
+    assert resp.status_code == 200
+    assert resp.text.strip() == "I don't know."
+    assert "Sources:" not in resp.text
+
+
+def test_ask_search_failure_returns_503(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Verify /ask returns HTTP 503 if embedding/search fails."""
+
+    def fail_search(*args, **kwargs):
+        raise RuntimeError("Embedding provider offline")
+
+    monkeypatch.setattr(main_module, "search_chunks", fail_search)
+
+    resp = client.post(
+        "/ask",
+        json={"question": "How does DINOv2 work?", "provider": "gemini"},
+    )
+    assert resp.status_code == 503
+    assert "Document search service unavailable" in resp.json()["detail"]

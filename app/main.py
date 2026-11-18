@@ -49,6 +49,13 @@ from app.models import (
     SearchResult,
 )
 from app.pricing import DEFAULT_MODELS
+from app.rag import (
+    NO_ANSWER_MESSAGE,
+    build_rag_prompt,
+    filter_relevant_chunks,
+    format_sources_footer,
+    is_refusal_answer,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -434,20 +441,24 @@ def search_documents(
 
 @app.post(
     "/ask",
-    summary="Ask an LLM",
+    summary="Ask Your Documents (RAG)",
     description=(
-        "Stream completion answers from configured LLM providers "
-        "(gemini, groq, ollama) with automatic retries and cost logging."
+        "Answer questions strictly from ingested documents using semantic retrieval "
+        "(pgvector) and grounded LLM generation with source file & page citations. "
+        "Returns \"I don't know\" when no relevant document context is found."
     ),
     responses={
         200: {
-            "description": "Streamed text response chunks from the LLM provider",
+            "description": (
+                "Streamed grounded answer with source file and page citations, "
+                "or an \"I don't know\" response when unsupported by documents."
+            ),
             "content": {"text/plain": {}},
         },
         400: {"model": ErrorResponse, "description": "Invalid question or provider"},
         503: {
             "model": ErrorResponse,
-            "description": "LLM provider unavailable or rate-limited",
+            "description": "Embedding or LLM provider unavailable or rate-limited",
         },
         504: {
             "model": ErrorResponse,
@@ -460,7 +471,7 @@ def ask_llm(
     request: AskRequest,
     session: Annotated[Session, Depends(get_session)],
 ) -> StreamingResponse:
-    """Stream response from selected LLM provider and persist call metrics."""
+    """Answer strictly from ingested documents with citations and 'I don't know'."""
     question = (request.question or "").strip()
     if not question:
         raise HTTPException(
@@ -478,8 +489,38 @@ def ask_llm(
             ),
         )
 
+    # 1. Retrieve top-k relevant document chunks from pgvector
     try:
-        gen = generate(prompt=question, provider=provider, session=session)
+        retrieved_chunks = search_chunks(
+            query=question,
+            k=request.k,
+            session=session,
+        )
+    except Exception as exc:
+        logger.error("Failed to retrieve document chunks for /ask: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Document search service unavailable: {exc}",
+        ) from exc
+
+    # 2. Enforce relevance threshold: short-circuit 'I don't know' without calling LLM
+    relevant_chunks = filter_relevant_chunks(retrieved_chunks)
+    if not relevant_chunks:
+        return StreamingResponse(
+            iter([NO_ANSWER_MESSAGE]),
+            media_type="text/plain",
+        )
+
+    # 3. Build strict grounded prompt with file & page metadata
+    rag_prompt = build_rag_prompt(question=question, chunks=relevant_chunks)
+
+    try:
+        gen = generate(
+            prompt=rag_prompt,
+            provider=provider,
+            session=session,
+            logged_prompt=question,
+        )
         # Trigger connection & retry loop before sending 200 header
         first_chunk = next(gen, None)
     except LLMTimeoutError as exc:
@@ -504,14 +545,24 @@ def ask_llm(
         ) from exc
 
     def stream_content() -> Iterator[str]:
+        collected: list[str] = []
         if first_chunk:
+            collected.append(first_chunk)
             yield first_chunk
         try:
             for chunk in gen:
                 if chunk:
+                    collected.append(chunk)
                     yield chunk
         except Exception as err:
             logger.error("Error during streaming generation: %s", err)
+            return
+
+        full_answer = "".join(collected)
+        if full_answer.strip() and not is_refusal_answer(full_answer):
+            sources_footer = format_sources_footer(relevant_chunks)
+            if sources_footer:
+                yield sources_footer
 
     return StreamingResponse(stream_content(), media_type="text/plain")
 

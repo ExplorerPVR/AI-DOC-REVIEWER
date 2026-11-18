@@ -461,13 +461,29 @@ uv run python scripts/eval_search.py
 
 ---
 
+## 🧠 Grounded Document Q&A / RAG (`POST /ask`)
+
+`POST /ask` implements Retrieval-Augmented Generation (RAG) grounded strictly on your ingested documents:
+
+- **Request**: `{"question": "...", "provider": "gemini" | "groq" | "ollama", "k": 5}`
+- **Retrieval & Relevance Gate**:
+  - Retrieves the top-`k` chunks from `READY` documents using pgvector cosine similarity (`search_chunks`).
+  - Filters chunks against `RAG_MIN_SIMILARITY_SCORE` (default `0.55`).
+  - If no documents are ready or no chunks meet the relevance floor, `/ask` immediately returns `"I don't know..."` without invoking the LLM.
+- **Strict Grounding & Citations**:
+  - Injects retrieved chunks with their file name and page number into a prompt-injection-resistant prompt (`app/rag.py`).
+  - Answers include inline `[filename, p. N]` citations plus a deduplicated `Sources:` footer (`- filename (page N)`).
+  - If the retrieved excerpts still do not contain the answer, the model responds `"I don't know."` and the `Sources:` footer is suppressed.
+
+---
+
 ## 🤖 Continuous Integration (CI) Checks
 
 The CI pipeline runs automatically on all pushes and pull requests via GitHub Actions (`.github/workflows/ci.yml`).
 
 ### Workflow Steps:
 1. **Lint & Code Style**: Runs `uv run ruff check .` to check for style violations, unformatted imports, and common programming errors.
-2. **Automated Testing**: Runs `uv run pytest` to execute the full unit and integration test suite (68 automated tests) against the in-memory SQLite database.
+2. **Database Migrations & Automated Testing**: Runs `uv run alembic upgrade head` against a `pgvector/pgvector:pg16` service container and executes the full test suite (75 automated tests, including a native PostgreSQL `pgvector` `<=>` integration test).
 
 ### Running CI Checks Locally:
 ```bash

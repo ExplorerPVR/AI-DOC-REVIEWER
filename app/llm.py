@@ -233,15 +233,18 @@ def _stream_groq(
             model=model,
             messages=[{"role": "user", "content": prompt}],
             stream=True,
-            stream_options={"include_usage": True},
         )
         for chunk in completion:
-            if usage is not None and hasattr(chunk, "usage") and chunk.usage:
-                u = chunk.usage
-                if getattr(u, "prompt_tokens", None) is not None:
-                    usage["input_tokens"] = u.prompt_tokens
-                if getattr(u, "completion_tokens", None) is not None:
-                    usage["output_tokens"] = u.completion_tokens
+            if usage is not None:
+                x_groq = getattr(chunk, "x_groq", None)
+                u = getattr(chunk, "usage", None) or (
+                    getattr(x_groq, "usage", None) if x_groq is not None else None
+                )
+                if u is not None:
+                    if getattr(u, "prompt_tokens", None) is not None:
+                        usage["input_tokens"] = u.prompt_tokens
+                    if getattr(u, "completion_tokens", None) is not None:
+                        usage["output_tokens"] = u.completion_tokens
             if chunk.choices and len(chunk.choices) > 0:
                 delta = chunk.choices[0].delta
                 content = getattr(delta, "content", None) or ""
@@ -431,6 +434,7 @@ def generate(
     provider: str = "gemini",
     session: Session | None = None,
     timeout: float = DEFAULT_TIMEOUT_SECONDS,
+    logged_prompt: str | None = None,
 ) -> Iterator[str]:
     """Generate streaming text response from the configured LLM provider.
 
@@ -499,7 +503,7 @@ def generate(
         _record_llm_call(
             provider=normalized_provider,
             model=model,
-            prompt=prompt,
+            prompt=logged_prompt if logged_prompt is not None else prompt,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             time_taken_seconds=duration,
