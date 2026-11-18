@@ -1,10 +1,12 @@
 """Unit and integration tests for GET /search semantic document retrieval."""
 
+import os
 import uuid
 from collections.abc import Generator
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import text
 from sqlmodel import Session, SQLModel, create_engine
 from sqlmodel.pool import StaticPool
 
@@ -231,3 +233,143 @@ def test_search_invalid_k_rejected(client: TestClient):
 
     resp_too_large = client.get("/search?q=valid&k=150")
     assert resp_too_large.status_code == 422
+
+
+def test_search_pgvector_postgres_integration(monkeypatch: pytest.MonkeyPatch):
+    """Integration test exercising the real PostgreSQL pgvector <=> query path.
+
+    Runs inside an uncommitted transaction that is always rolled back so no
+    test records persist in PostgreSQL. Skips cleanly if PostgreSQL/pgvector
+    is unreachable in the current environment.
+    """
+    pg_url = os.getenv("TEST_POSTGRES_URL") or os.getenv("DATABASE_URL") or ""
+    if not pg_url.startswith("postgresql"):
+        pytest.skip("PostgreSQL DATABASE_URL not configured.")
+
+    pg_engine = create_engine(pg_url, pool_pre_ping=True)
+    try:
+        with pg_engine.connect() as probe:
+            has_vector = probe.execute(
+                text("SELECT 1 FROM pg_extension WHERE extname = 'vector'")
+            ).scalar()
+            if not has_vector:
+                pytest.skip("pgvector extension is not enabled in PostgreSQL.")
+    except Exception as exc:
+        pg_engine.dispose()
+        pytest.skip(f"PostgreSQL unavailable for integration test: {exc}")
+
+    # Query vector along basis dimension 0 so our synthetic chunks deterministically
+    # outrank any real dense document embeddings that may exist in the DB.
+    query_vec = [1.0] + [0.0] * (EMBEDDING_DIMENSION - 1)
+    monkeypatch.setattr(
+        ingestion_module,
+        "generate_embedding",
+        lambda *args, **kwargs: query_vec,
+    )
+
+    conn = pg_engine.connect()
+    tx = conn.begin()
+    pg_session = Session(bind=conn)
+
+    def get_pg_session_override() -> Generator[Session, None, None]:
+        yield pg_session
+
+    app.dependency_overrides[get_session] = get_pg_session_override
+    try:
+        assert pg_session.get_bind().dialect.name == "postgresql"
+
+        ready_doc_id = uuid.uuid4()
+        ready_filename = f"pgvector_integration_{ready_doc_id.hex[:8]}.pdf"
+        pending_doc_id = uuid.uuid4()
+        pending_filename = f"pgvector_pending_{pending_doc_id.hex[:8]}.pdf"
+
+        pg_session.add(
+            Document(
+                id=ready_doc_id,
+                filename=ready_filename,
+                content_type="application/pdf",
+                size_bytes=2048,
+                status=DocumentStatus.READY,
+            )
+        )
+        pg_session.add(
+            Document(
+                id=pending_doc_id,
+                filename=pending_filename,
+                content_type="application/pdf",
+                size_bytes=1024,
+                status=DocumentStatus.PENDING,
+            )
+        )
+
+        # Flush documents first so foreign keys exist before inserting chunks
+        pg_session.flush()
+
+        # Three READY chunks with known cosine similarities: 1.0, 0.95, 0.80
+        pg_session.add_all(
+            [
+                Chunk(
+                    document_id=ready_doc_id,
+                    filename=ready_filename,
+                    page_number=3,
+                    chunk_index=0,
+                    text="Third closest pgvector chunk (cosine similarity 0.80).",
+                    embedding=[0.8, 0.6] + [0.0] * (EMBEDDING_DIMENSION - 2),
+                ),
+                Chunk(
+                    document_id=ready_doc_id,
+                    filename=ready_filename,
+                    page_number=1,
+                    chunk_index=1,
+                    text="Exact match pgvector chunk (cosine similarity 1.00).",
+                    embedding=[1.0, 0.0] + [0.0] * (EMBEDDING_DIMENSION - 2),
+                ),
+                Chunk(
+                    document_id=ready_doc_id,
+                    filename=ready_filename,
+                    page_number=2,
+                    chunk_index=2,
+                    text="Second closest pgvector chunk (cosine similarity 0.95).",
+                    embedding=[0.95, 0.3122499] + [0.0] * (EMBEDDING_DIMENSION - 2),
+                ),
+                # Identical vector on a PENDING doc: must be excluded by WHERE READY
+                Chunk(
+                    document_id=pending_doc_id,
+                    filename=pending_filename,
+                    page_number=99,
+                    chunk_index=0,
+                    text="Pending document chunk that must never appear in search.",
+                    embedding=[1.0, 0.0] + [0.0] * (EMBEDDING_DIMENSION - 2),
+                ),
+            ]
+        )
+        pg_session.flush()
+
+        pg_client = TestClient(app)
+        resp = pg_client.get("/search?q=pgvector%20cosine%20distance&k=3")
+        assert resp.status_code == 200
+        results = resp.json()
+
+        assert len(results) == 3
+
+        # Verify closest-first ordering computed natively by pgvector <=> operator
+        assert results[0]["filename"] == ready_filename
+        assert results[0]["page"] == 1
+        assert results[0]["score"] == pytest.approx(1.0, abs=1e-4)
+
+        assert results[1]["filename"] == ready_filename
+        assert results[1]["page"] == 2
+        assert results[1]["score"] == pytest.approx(0.95, abs=1e-3)
+
+        assert results[2]["filename"] == ready_filename
+        assert results[2]["page"] == 3
+        assert results[2]["score"] == pytest.approx(0.8, abs=1e-3)
+
+        assert results[0]["score"] > results[1]["score"] > results[2]["score"]
+        assert all(item["filename"] != pending_filename for item in results)
+    finally:
+        app.dependency_overrides.pop(get_session, None)
+        pg_session.close()
+        tx.rollback()
+        conn.close()
+        pg_engine.dispose()
