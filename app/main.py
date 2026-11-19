@@ -190,6 +190,7 @@ async def health_check() -> HealthResponse:
         409: {"model": ErrorResponse, "description": "Duplicate filename"},
         413: {"model": ErrorResponse, "description": "File exceeds 10 MB maximum size"},
         415: {"model": ErrorResponse, "description": "Unsupported file extension"},
+        503: {"model": ErrorResponse, "description": "Database service unavailable"},
     },
     tags=["Documents"],
 )
@@ -338,6 +339,9 @@ async def upload_document(
     status_code=status.HTTP_200_OK,
     summary="List Documents",
     description="Retrieve metadata for all uploaded documents stored in PostgreSQL.",
+    responses={
+        503: {"model": ErrorResponse, "description": "Database service unavailable"},
+    },
     tags=["Documents"],
 )
 def list_documents(
@@ -355,6 +359,10 @@ def list_documents(
     status_code=status.HTTP_200_OK,
     summary="Get Document Details",
     description="Retrieve metadata and ingestion status for a single document.",
+    responses={
+        404: {"model": ErrorResponse, "description": "Document not found"},
+        503: {"model": ErrorResponse, "description": "Database service unavailable"},
+    },
     tags=["Documents"],
 )
 def get_document(
@@ -377,6 +385,10 @@ def get_document(
     status_code=status.HTTP_200_OK,
     summary="Get Document Chunks",
     description="Retrieve all text chunks generated for an ingested document.",
+    responses={
+        404: {"model": ErrorResponse, "description": "Document not found"},
+        503: {"model": ErrorResponse, "description": "Database service unavailable"},
+    },
     tags=["Documents"],
 )
 def get_document_chunks(
@@ -409,6 +421,10 @@ def get_document_chunks(
         "Search ingested document chunks by semantic cosine distance using "
         "pgvector's <=> operator, returning the top k most relevant matches."
     ),
+    responses={
+        422: {"model": ErrorResponse, "description": "Invalid search parameters"},
+        503: {"model": ErrorResponse, "description": "Database service unavailable"},
+    },
     tags=["Search"],
 )
 def search_documents(
