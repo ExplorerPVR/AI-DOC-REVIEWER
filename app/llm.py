@@ -163,8 +163,20 @@ def _stream_gemini(
             api_key=api_key,
             http_options={"timeout": timeout_ms} if timeout_ms else None,
         )
+        # Automatic fallback for deprecated / overloaded legacy model names
+        legacy_gemini_models = {
+            "gemini-flash-latest",
+            "gemini-1.5-flash",
+            "gemini-2.0-flash",
+            "gemini-2.5-flash",
+        }
+        model_to_use = (
+            os.getenv("GEMINI_MODEL", "gemini-3.1-flash-lite")
+            if model in legacy_gemini_models
+            else model
+        )
         response = client.models.generate_content_stream(
-            model=model,
+            model=model_to_use,
             contents=prompt,
         )
         for chunk in response:
@@ -290,7 +302,12 @@ def _stream_ollama(
             with client.stream(
                 "POST",
                 url,
-                json={"model": model, "prompt": prompt, "stream": True},
+                json={
+                    "model": model,
+                    "prompt": prompt,
+                    "stream": True,
+                    "keep_alive": "24h",
+                },
             ) as response:
                 if response.status_code == 429:
                     raise LLMRateLimitError("Ollama rate limit exceeded")

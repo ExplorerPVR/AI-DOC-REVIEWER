@@ -135,8 +135,20 @@ def _call_gemini_json(
             temperature=0.0,
         )
 
+        # Automatic fallback for deprecated / overloaded legacy model names
+        legacy_gemini_models = {
+            "gemini-flash-latest",
+            "gemini-1.5-flash",
+            "gemini-2.0-flash",
+            "gemini-2.5-flash",
+        }
+        model_to_use = (
+            os.getenv("GEMINI_MODEL", "gemini-3.1-flash-lite")
+            if model in legacy_gemini_models
+            else model
+        )
         response = client.models.generate_content(
-            model=model,
+            model=model_to_use,
             contents=prompt,
             config=config,
         )
@@ -245,6 +257,7 @@ def _call_ollama_json(
                     "prompt": prompt,
                     "format": "json",
                     "stream": False,
+                    "keep_alive": "24h",
                     "options": {"temperature": 0.0},
                 },
             )

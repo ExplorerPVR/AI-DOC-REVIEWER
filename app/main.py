@@ -1,11 +1,13 @@
 """FastAPI application entrypoint and routes for AI Document Assistant."""
 
+import asyncio
 import io
 import logging
 import os
 import re
 import zipfile
 from collections.abc import Iterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated
 from uuid import UUID, uuid4
@@ -67,6 +69,29 @@ CHUNK_SIZE_BYTES: int = 1024 * 1024  # 1 MB read chunk size
 ALLOWED_EXTENSIONS: set[str] = {".pdf", ".txt", ".docx"}
 UPLOAD_DIR: Path = Path(os.getenv("UPLOAD_DIR", "uploads"))
 
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Lifespan context manager for startup pre-warming and cleanup."""
+    async def _prewarm_ollama():
+        base_url = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
+        model = os.getenv("OLLAMA_MODEL", "llama3")
+        try:
+            import httpx
+
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                await client.post(
+                    f"{base_url}/api/generate",
+                    json={"model": model, "keep_alive": "24h"},
+                )
+                logger.info("Local Ollama model '%s' pre-warmed successfully.", model)
+        except Exception as exc:
+            logger.debug("Ollama pre-warm skipped: %s", exc)
+
+    asyncio.create_task(_prewarm_ollama())
+    yield
+
+
 app = FastAPI(
     title="AI Document Assistant",
     description=(
@@ -76,6 +101,7 @@ app = FastAPI(
     version="0.3.0",
     docs_url="/docs",
     redoc_url="/redoc",
+    lifespan=lifespan,
 )
 
 
