@@ -53,10 +53,12 @@ from app.models import (
 from app.pricing import DEFAULT_MODELS
 from app.rag import (
     NO_ANSWER_MESSAGE,
+    RAG_SYSTEM_INSTRUCTIONS,
     build_rag_prompt,
     filter_relevant_chunks,
     format_sources_footer,
     is_refusal_answer,
+    validate_inline_citations,
 )
 
 logger = logging.getLogger(__name__)
@@ -285,10 +287,8 @@ async def upload_document(
     # 6. Extract content type with fallback
     content_type = file.content_type or "application/octet-stream"
 
-    # 7. Initial status: pending for PDF (background ingestion), ready for others
-    initial_status = (
-        DocumentStatus.PENDING if extension == ".pdf" else DocumentStatus.READY
-    )
+    # 7. Initial status: pending for background ingestion across all file types
+    initial_status = DocumentStatus.PENDING
 
     # 8. Generate document UUID upfront to bind file path and database record
     doc_id = uuid4()
@@ -348,13 +348,12 @@ async def upload_document(
         )
         raise
 
-    # 12. Schedule background ingestion for PDFs
-    if extension == ".pdf":
-        background_tasks.add_task(
-            ingest_document_pdf,
-            document_id=doc_record.id,
-            file_path=str(destination),
-        )
+    # 12. Schedule background ingestion across all supported types (.pdf, .txt, .docx)
+    background_tasks.add_task(
+        ingest_document_pdf,
+        document_id=doc_record.id,
+        file_path=str(destination),
+    )
 
     return doc_record
 
@@ -556,14 +555,19 @@ def ask_llm(
         )
 
     # 3. Build strict grounded prompt with file & page metadata
-    rag_prompt = build_rag_prompt(question=question, chunks=relevant_chunks)
+    rag_user_prompt = build_rag_prompt(
+        question=question,
+        chunks=relevant_chunks,
+        include_system_instructions=False,
+    )
 
     try:
         gen = generate(
-            prompt=rag_prompt,
+            prompt=rag_user_prompt,
             provider=provider,
             session=session,
             logged_prompt=question,
+            system_instruction=RAG_SYSTEM_INSTRUCTIONS,
         )
         # Trigger connection & retry loop before sending 200 header
         first_chunk = next(gen, None)
@@ -604,9 +608,14 @@ def ask_llm(
 
         full_answer = "".join(collected)
         if full_answer.strip() and not is_refusal_answer(full_answer):
-            sources_footer = format_sources_footer(relevant_chunks)
-            if sources_footer:
-                yield sources_footer
+            if validate_inline_citations(full_answer, relevant_chunks):
+                sources_footer = format_sources_footer(relevant_chunks)
+                if sources_footer:
+                    yield sources_footer
+            else:
+                logger.warning(
+                    "Suppressed sources footer: answer has ungrounded citations."
+                )
 
     return StreamingResponse(stream_content(), media_type="text/plain")
 
