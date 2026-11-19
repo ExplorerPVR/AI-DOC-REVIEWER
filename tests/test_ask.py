@@ -768,3 +768,21 @@ def test_ask_forwards_system_instructions(
     assert RAG_SYSTEM_INSTRUCTIONS not in captured["prompt"]
     assert "<context>" in captured["prompt"]
     assert "<question>" in captured["prompt"]
+
+
+def test_xml_delimiter_escaping_with_attributes():
+    """Verify tags with attributes and whitespace are neutralized."""
+    assert escape_xml_delimiters('<context id="1">') == r"<\context>"
+    assert escape_xml_delimiters('<question type="override">') == r"<\question>"
+    assert escape_xml_delimiters('</context class="fake">') == r"<\/context>"
+    assert escape_xml_delimiters('< / resume_data key="val" >') == r"<\/resume_data>"
+
+
+def test_ask_question_exceeding_max_length_rejected(client: TestClient):
+    """Verify questions exceeding 2000 characters are rejected with 422."""
+    oversized_question = "a" * 2001
+    resp = client.post(
+        "/ask",
+        json={"question": oversized_question, "provider": "gemini"},
+    )
+    assert resp.status_code == 422

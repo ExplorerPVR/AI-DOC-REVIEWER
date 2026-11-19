@@ -239,6 +239,7 @@ class AskRequest(BaseModel):
 
     question: str = PydanticField(
         min_length=1,
+        max_length=2000,
         description="Question to answer strictly from uploaded documents",
         examples=["How do Masked Autoencoders scale with vision transformers?"],
     )

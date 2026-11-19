@@ -181,10 +181,15 @@ def _stream_gemini(
             "model": model_to_use,
             "contents": prompt,
         }
+        config_kwargs: dict[str, Any] = {"temperature": 0.0}
         if system_instruction:
-            call_kwargs["config"] = types.GenerateContentConfig(
-                system_instruction=system_instruction
-            )
+            config_kwargs["system_instruction"] = system_instruction
+
+        sig = inspect.signature(client.models.generate_content_stream)
+        if "config" in sig.parameters or any(
+            p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+        ):
+            call_kwargs["config"] = types.GenerateContentConfig(**config_kwargs)
 
         response = client.models.generate_content_stream(**call_kwargs)
         for chunk in response:
@@ -258,6 +263,7 @@ def _stream_groq(
         completion = client.chat.completions.create(
             model=model,
             messages=messages,
+            temperature=0.0,
             stream=True,
         )
         for chunk in completion:
@@ -317,6 +323,7 @@ def _stream_ollama(
         "prompt": prompt,
         "stream": True,
         "keep_alive": "24h",
+        "options": {"temperature": 0.0},
     }
     if system_instruction:
         payload["system"] = system_instruction

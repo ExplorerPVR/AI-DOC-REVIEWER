@@ -57,16 +57,16 @@ def escape_xml_delimiters(text: str) -> str:
     """Escape XML tag delimiters to prevent delimiter smuggling and tag breakout."""
     if not text:
         return ""
-    # Neutralize closing delimiter tags with flexible whitespace: < / question >
+    # Neutralize closing delimiter tags with flexible whitespace or attributes
     escaped = re.sub(
-        r"<\s*/\s*(context|question|resume_data)\s*>",
+        r"<\s*/\s*(context|question|resume_data)(?:\s+[^>]*)?>",
         r"<\\/\1>",
         text,
         flags=re.IGNORECASE,
     )
-    # Neutralize opening structural delimiter tags: <context>, < question >
+    # Neutralize opening delimiter tags with flexible whitespace or attributes
     escaped = re.sub(
-        r"<\s*(context|question|resume_data)\s*>",
+        r"<\s*(context|question|resume_data)(?:\s+[^>]*)?>",
         r"<\\\1>",
         escaped,
         flags=re.IGNORECASE,

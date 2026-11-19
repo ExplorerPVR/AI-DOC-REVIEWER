@@ -457,6 +457,7 @@ def search_documents(
         str,
         Query(
             min_length=1,
+            max_length=2000,
             description="Search query question to embed and search",
         ),
     ],
