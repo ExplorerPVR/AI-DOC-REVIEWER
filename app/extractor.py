@@ -412,7 +412,7 @@ def extract_resume_data(
 
     # Both attempts failed validation: return HTTP 422 with clear message
     raise HTTPException(
-        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
         detail=(
             f"Failed to extract valid resume data after retry: {last_validation_error}"
         ),

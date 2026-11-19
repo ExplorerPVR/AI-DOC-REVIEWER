@@ -479,7 +479,9 @@ def ask_llm(
             detail="The 'question' field cannot be empty.",
         )
 
-    provider = (request.provider or "gemini").lower().strip()
+    provider = (
+        request.provider or os.getenv("DEFAULT_LLM_PROVIDER", "gemini")
+    ).lower().strip()
     if provider not in DEFAULT_MODELS:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -612,8 +614,11 @@ def extract_resume(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="The resume 'text' field cannot be empty.",
         )
+    provider = (
+        request.provider or os.getenv("DEFAULT_LLM_PROVIDER", "gemini")
+    ).lower().strip()
     return extract_resume_data(
         resume_text=content,
-        provider=request.provider,
+        provider=provider,
         session=session,
     )

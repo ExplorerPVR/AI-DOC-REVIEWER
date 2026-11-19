@@ -241,7 +241,8 @@ def test_search_postgresql_pgvector_integration(monkeypatch: pytest.MonkeyPatch)
     if not pg_url.startswith("postgresql"):
         pytest.skip("PostgreSQL DATABASE_URL not configured for pgvector integration.")
 
-    pg_engine = create_engine(pg_url, pool_pre_ping=True)
+    connect_args = {"connect_timeout": 3} if "sqlite" not in pg_url else {}
+    pg_engine = create_engine(pg_url, connect_args=connect_args, pool_pre_ping=True)
     try:
         with pg_engine.connect() as conn:
             conn.execute(text("SELECT 1"))
