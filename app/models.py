@@ -119,7 +119,10 @@ class ChunkBase(SQLModel):
         description="Source document file name",
     )
     page_number: int = SQLModelField(
-        description="1-based page number from the PDF document",
+        description=(
+            "1-based page number from PDF or DOCX (page breaks). "
+            "For reflowable documents without breaks, defaults to 1."
+        ),
     )
     chunk_index: int = SQLModelField(
         default=0,
@@ -168,7 +171,10 @@ class SearchResult(SQLModel):
         description="Source document file name",
     )
     page: int = SQLModelField(
-        description="1-based page number where the chunk appears",
+        description=(
+            "1-based page number where the chunk appears. "
+            "For unpaginated reflowable documents, reflects document page 1."
+        ),
     )
     score: float = SQLModelField(
         description="Cosine similarity score (higher is closer, range [0, 1])",

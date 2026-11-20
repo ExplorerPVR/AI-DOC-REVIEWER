@@ -486,7 +486,8 @@ def search_documents(
     summary="Ask Your Documents (RAG)",
     description=(
         "Answer questions strictly from ingested documents using semantic retrieval "
-        "(pgvector) and grounded LLM generation with source file & page citations. "
+        "(pgvector) and grounded LLM generation with source file & page citations "
+        "(page-level for PDF/paginated DOCX, document page 1 for unpaginated text). "
         "Returns \"I don't know\" when no relevant document context is found."
     ),
     responses={
