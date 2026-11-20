@@ -19,7 +19,9 @@ from app.ingestion import (
     clean_pdf_text,
     generate_embedding,
     generate_embeddings_batch,
+    ingest_document,
     ingest_document_pdf,
+    read_docx_pages,
     read_pdf_pages,
     sanitize_error_message,
 )
@@ -550,3 +552,175 @@ def test_get_document_chunks_endpoint(client: TestClient, session: Session):
     assert chunks_data[0]["chunk_index"] == 0
     assert chunks_data[0]["text"] == "Chapter 1 Introduction to vectors"
     assert chunks_data[1]["chunk_index"] == 1
+
+
+def test_background_ingestion_txt_success(
+    tmp_path: Path, session: Session, monkeypatch: pytest.MonkeyPatch
+):
+    """Verify plain text (.txt) background ingestion creates chunks and sets READY."""
+    txt_file = tmp_path / "notes.txt"
+    txt_file.write_text(
+        "PostgreSQL pgvector extension enables fast semantic search. "
+        "Chunking text allows fine-grained similarity matching.",
+        encoding="utf-8",
+    )
+
+    doc = Document(
+        filename="notes.txt",
+        content_type="text/plain",
+        size_bytes=len(txt_file.read_bytes()),
+        status=DocumentStatus.PENDING,
+        file_path=str(txt_file),
+    )
+    session.add(doc)
+    session.commit()
+    session.refresh(doc)
+
+    monkeypatch.setattr(
+        ingestion_module,
+        "generate_embeddings_batch",
+        lambda texts, *args, **kwargs: [[0.05] * EMBEDDING_DIMENSION for _ in texts],
+    )
+
+    ingest_document(
+        document_id=doc.id,
+        file_path=str(txt_file),
+        session_factory=lambda: Session(test_engine),
+    )
+
+    with Session(test_engine) as check_session:
+        updated_doc = check_session.get(Document, doc.id)
+        assert updated_doc is not None
+        assert updated_doc.status == DocumentStatus.READY
+        assert updated_doc.error_message is None
+
+        chunks = check_session.exec(
+            select(Chunk).where(Chunk.document_id == doc.id)
+        ).all()
+        assert len(chunks) >= 1
+        assert chunks[0].filename == "notes.txt"
+        assert chunks[0].page_number == 1
+        assert len(chunks[0].embedding) == EMBEDDING_DIMENSION
+
+
+def test_background_ingestion_docx_success(
+    tmp_path: Path, session: Session, monkeypatch: pytest.MonkeyPatch
+):
+    """Verify Word (.docx) background ingestion creates chunks and sets READY."""
+    from docx import Document as DocxDocument
+
+    docx_file = tmp_path / "spec.docx"
+    doc_obj = DocxDocument()
+    doc_obj.add_paragraph("Specification overview for RAG grounding pipeline.")
+    doc_obj.add_paragraph("Second paragraph detailing retrieval and prompt defense.")
+    doc_obj.save(str(docx_file))
+
+    doc = Document(
+        filename="spec.docx",
+        content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        size_bytes=len(docx_file.read_bytes()),
+        status=DocumentStatus.PENDING,
+        file_path=str(docx_file),
+    )
+    session.add(doc)
+    session.commit()
+    session.refresh(doc)
+
+    monkeypatch.setattr(
+        ingestion_module,
+        "generate_embeddings_batch",
+        lambda texts, *args, **kwargs: [[0.03] * EMBEDDING_DIMENSION for _ in texts],
+    )
+
+    ingest_document(
+        document_id=doc.id,
+        file_path=str(docx_file),
+        session_factory=lambda: Session(test_engine),
+    )
+
+    with Session(test_engine) as check_session:
+        updated_doc = check_session.get(Document, doc.id)
+        assert updated_doc is not None
+        assert updated_doc.status == DocumentStatus.READY
+        assert updated_doc.error_message is None
+
+        chunks = check_session.exec(
+            select(Chunk).where(Chunk.document_id == doc.id)
+        ).all()
+        assert len(chunks) >= 1
+        assert chunks[0].filename == "spec.docx"
+        assert chunks[0].page_number == 1
+        assert len(chunks[0].embedding) == EMBEDDING_DIMENSION
+
+
+def test_read_docx_pages_multipage_with_breaks(tmp_path: Path):
+    """Verify DOCX page breaks are detected and split into separate pages."""
+    import docx
+
+    docx_path = tmp_path / "multipage.docx"
+    doc = docx.Document()
+    doc.add_paragraph("Section 1 content on first page.")
+    p = doc.add_paragraph("End of page one.")
+    p.add_run().add_break(docx.enum.text.WD_BREAK.PAGE)
+    doc.add_paragraph("Section 2 content on second page.")
+    doc.save(str(docx_path))
+
+    pages = read_docx_pages(docx_path)
+    assert len(pages) == 2
+    assert pages[0][0] == 1
+    assert "Section 1 content on first page." in pages[0][1]
+    assert pages[1][0] == 2
+    assert "Section 2 content on second page." in pages[1][1]
+
+
+def test_background_ingestion_docx_multipage_preserves_page_numbers(
+    tmp_path: Path, session: Session, monkeypatch: pytest.MonkeyPatch
+):
+    """Verify multi-page DOCX ingestion indexes chunks with distinct page numbers."""
+    import docx
+
+    docx_file = tmp_path / "report.docx"
+    doc = docx.Document()
+    doc.add_paragraph("Introduction and executive summary.")
+    p = doc.add_paragraph("Concluding summary of part 1.")
+    p.add_run().add_break(docx.enum.text.WD_BREAK.PAGE)
+    doc.add_paragraph("Detailed methodology and quantitative results.")
+    doc.save(str(docx_file))
+
+    doc_record = Document(
+        filename="report.docx",
+        content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        size_bytes=len(docx_file.read_bytes()),
+        status=DocumentStatus.PENDING,
+        file_path=str(docx_file),
+    )
+    session.add(doc_record)
+    session.commit()
+    session.refresh(doc_record)
+
+    monkeypatch.setattr(
+        ingestion_module,
+        "generate_embeddings_batch",
+        lambda texts, *args, **kwargs: [[0.01] * EMBEDDING_DIMENSION for _ in texts],
+    )
+
+    ingest_document(
+        document_id=doc_record.id,
+        file_path=str(docx_file),
+        session_factory=lambda: Session(test_engine),
+    )
+
+    with Session(test_engine) as check_session:
+        updated_doc = check_session.get(Document, doc_record.id)
+        assert updated_doc is not None
+        assert updated_doc.status == DocumentStatus.READY
+
+        chunks = check_session.exec(
+            select(Chunk)
+            .where(Chunk.document_id == doc_record.id)
+            .order_by(Chunk.page_number)
+        ).all()
+        assert len(chunks) >= 2
+        pages_found = {chk.page_number for chk in chunks}
+        assert 1 in pages_found
+        assert 2 in pages_found

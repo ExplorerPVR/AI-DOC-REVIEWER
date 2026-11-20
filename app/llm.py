@@ -148,6 +148,7 @@ def _stream_gemini(
     model: str,
     timeout: float = DEFAULT_TIMEOUT_SECONDS,
     usage: dict[str, int] | None = None,
+    system_instruction: str | None = None,
 ) -> Iterator[str]:
     """Stream text completion chunks from Google Gemini."""
     api_key = (os.getenv("GEMINI_API_KEY") or "").strip("'\" ")
@@ -157,16 +158,40 @@ def _stream_gemini(
     try:
         from google import genai
         from google.genai import errors as genai_errors
+        from google.genai import types
 
         timeout_ms = int(timeout * 1000) if timeout else None
         client = genai.Client(
             api_key=api_key,
             http_options={"timeout": timeout_ms} if timeout_ms else None,
         )
-        response = client.models.generate_content_stream(
-            model=model,
-            contents=prompt,
+        # Automatic fallback for deprecated / overloaded legacy model names
+        legacy_gemini_models = {
+            "gemini-flash-latest",
+            "gemini-1.5-flash",
+            "gemini-2.0-flash",
+            "gemini-2.5-flash",
+        }
+        model_to_use = (
+            os.getenv("GEMINI_MODEL", "gemini-3.1-flash-lite")
+            if model in legacy_gemini_models
+            else model
         )
+        call_kwargs: dict[str, Any] = {
+            "model": model_to_use,
+            "contents": prompt,
+        }
+        config_kwargs: dict[str, Any] = {"temperature": 0.0}
+        if system_instruction:
+            config_kwargs["system_instruction"] = system_instruction
+
+        sig = inspect.signature(client.models.generate_content_stream)
+        if "config" in sig.parameters or any(
+            p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+        ):
+            call_kwargs["config"] = types.GenerateContentConfig(**config_kwargs)
+
+        response = client.models.generate_content_stream(**call_kwargs)
         for chunk in response:
             if (
                 usage is not None
@@ -213,6 +238,7 @@ def _stream_groq(
     model: str,
     timeout: float = DEFAULT_TIMEOUT_SECONDS,
     usage: dict[str, int] | None = None,
+    system_instruction: str | None = None,
 ) -> Iterator[str]:
     """Stream text completion chunks from Groq Cloud."""
     api_key = (os.getenv("GROQ_API_KEY") or "").strip("'\" ")
@@ -229,19 +255,28 @@ def _stream_groq(
         )
 
         client = Groq(api_key=api_key, timeout=timeout)
+        messages: list[dict[str, str]] = []
+        if system_instruction:
+            messages.append({"role": "system", "content": system_instruction})
+        messages.append({"role": "user", "content": prompt})
+
         completion = client.chat.completions.create(
             model=model,
-            messages=[{"role": "user", "content": prompt}],
+            messages=messages,
+            temperature=0.0,
             stream=True,
-            stream_options={"include_usage": True},
         )
         for chunk in completion:
-            if usage is not None and hasattr(chunk, "usage") and chunk.usage:
-                u = chunk.usage
-                if getattr(u, "prompt_tokens", None) is not None:
-                    usage["input_tokens"] = u.prompt_tokens
-                if getattr(u, "completion_tokens", None) is not None:
-                    usage["output_tokens"] = u.completion_tokens
+            if usage is not None:
+                x_groq = getattr(chunk, "x_groq", None)
+                u = getattr(chunk, "usage", None) or (
+                    getattr(x_groq, "usage", None) if x_groq is not None else None
+                )
+                if u is not None:
+                    if getattr(u, "prompt_tokens", None) is not None:
+                        usage["input_tokens"] = u.prompt_tokens
+                    if getattr(u, "completion_tokens", None) is not None:
+                        usage["output_tokens"] = u.completion_tokens
             if chunk.choices and len(chunk.choices) > 0:
                 delta = chunk.choices[0].delta
                 content = getattr(delta, "content", None) or ""
@@ -269,6 +304,7 @@ def _stream_ollama(
     model: str,
     timeout: float = DEFAULT_TIMEOUT_SECONDS,
     usage: dict[str, int] | None = None,
+    system_instruction: str | None = None,
 ) -> Iterator[str]:
     """Stream text completion chunks from local Ollama service."""
     base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/")
@@ -282,12 +318,22 @@ def _stream_ollama(
         )
     url = f"{base_url}/api/generate"
 
+    payload: dict[str, Any] = {
+        "model": model,
+        "prompt": prompt,
+        "stream": True,
+        "keep_alive": "24h",
+        "options": {"temperature": 0.0},
+    }
+    if system_instruction:
+        payload["system"] = system_instruction
+
     try:
         with httpx.Client(timeout=timeout) as client:
             with client.stream(
                 "POST",
                 url,
-                json={"model": model, "prompt": prompt, "stream": True},
+                json=payload,
             ) as response:
                 if response.status_code == 429:
                     raise LLMRateLimitError("Ollama rate limit exceeded")
@@ -336,6 +382,7 @@ def _start_provider_stream(
     model: str,
     timeout: float = DEFAULT_TIMEOUT_SECONDS,
     usage: dict[str, int] | None = None,
+    system_instruction: str | None = None,
 ) -> tuple[str | None, Iterator[str]]:
     """Start provider stream and pull the first chunk inside the retry loop.
 
@@ -353,12 +400,21 @@ def _start_provider_stream(
         raise ValueError(f"Unsupported LLM provider '{provider}'")
 
     sig = inspect.signature(stream_func)
+    kwargs: dict[str, Any] = {
+        "prompt": prompt,
+        "model": model,
+        "timeout": timeout,
+    }
     if "usage" in sig.parameters or any(
         p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
     ):
-        stream = stream_func(prompt=prompt, model=model, timeout=timeout, usage=usage)
-    else:
-        stream = stream_func(prompt=prompt, model=model, timeout=timeout)
+        kwargs["usage"] = usage
+    if "system_instruction" in sig.parameters or any(
+        p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+    ):
+        kwargs["system_instruction"] = system_instruction
+
+    stream = stream_func(**kwargs)
 
     first_chunk: str | None = None
     for chunk in stream:
@@ -431,6 +487,8 @@ def generate(
     provider: str = "gemini",
     session: Session | None = None,
     timeout: float = DEFAULT_TIMEOUT_SECONDS,
+    logged_prompt: str | None = None,
+    system_instruction: str | None = None,
 ) -> Iterator[str]:
     """Generate streaming text response from the configured LLM provider.
 
@@ -444,6 +502,10 @@ def generate(
         Active SQLModel database session for persisting the LLMCall record.
     timeout : float
         Per-call timeout threshold in seconds. Default 30.0s.
+    logged_prompt : str, optional
+        Alternate prompt string to store in the LLMCall audit record.
+    system_instruction : str, optional
+        High-authority system instructions dispatched via native provider system roles.
 
     Yields
     ------
@@ -469,6 +531,7 @@ def generate(
         model=model,
         timeout=timeout,
         usage=usage,
+        system_instruction=system_instruction,
     )
 
     # 2. Consume and yield stream while accumulating output metrics
@@ -499,7 +562,7 @@ def generate(
         _record_llm_call(
             provider=normalized_provider,
             model=model,
-            prompt=prompt,
+            prompt=logged_prompt if logged_prompt is not None else prompt,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             time_taken_seconds=duration,

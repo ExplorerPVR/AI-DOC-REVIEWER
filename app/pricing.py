@@ -23,6 +23,18 @@ class ModelPrice:
 # Free calls still carry a price on paper based on published provider rates.
 MODEL_PRICING: dict[str, ModelPrice] = {
     # Google Gemini Models (source: ai.google.dev/pricing)
+    "gemini-3.1-flash-lite": ModelPrice(
+        input_price_per_million=0.075,
+        output_price_per_million=0.30,
+    ),
+    "gemini-3.5-flash-lite": ModelPrice(
+        input_price_per_million=0.075,
+        output_price_per_million=0.30,
+    ),
+    "gemini-flash-lite-latest": ModelPrice(
+        input_price_per_million=0.075,
+        output_price_per_million=0.30,
+    ),
     "gemini-flash-latest": ModelPrice(
         input_price_per_million=0.10,
         output_price_per_million=0.40,
@@ -69,7 +81,7 @@ MODEL_PRICING: dict[str, ModelPrice] = {
 
 # Default models per provider (can be overridden via environment variable)
 DEFAULT_MODELS: dict[str, str] = {
-    "gemini": os.getenv("GEMINI_MODEL", "gemini-flash-latest"),
+    "gemini": os.getenv("GEMINI_MODEL", "gemini-3.1-flash-lite"),
     "groq": os.getenv("GROQ_MODEL", "qwen/qwen3.8-27b"),
     "ollama": os.getenv("OLLAMA_MODEL", "llama3"),
 }

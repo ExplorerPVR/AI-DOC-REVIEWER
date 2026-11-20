@@ -294,18 +294,19 @@ Streams answers from configured LLM providers (Gemini, Groq, Ollama) with automa
 
 - **URL**: `POST /ask`
 - **Content-Type**: `application/json`
-- **Transfer-Encoding**: `chunked` (text/plain streaming)
+- **Transfer-Encoding**: `chunked` (`text/plain` streaming by default, or Server-Sent Events with `"stream_format": "sse"` or `Accept: text/event-stream`)
 
 ```bash
-# Ask Gemini (default)
+# Ask Gemini (default plain text streaming)
 curl -N -X POST "http://127.0.0.1:8000/ask" \
   -H "Content-Type: application/json" \
   -d '{"question": "What is the difference between SQL and NoSQL in two sentences?", "provider": "gemini"}'
 
-# Ask Groq
+# Ask with Server-Sent Events (SSE)
 curl -N -X POST "http://127.0.0.1:8000/ask" \
   -H "Content-Type: application/json" \
-  -d '{"question": "Explain Docker containers briefly.", "provider": "groq"}'
+  -H "Accept: text/event-stream" \
+  -d '{"question": "Explain Docker containers briefly.", "provider": "groq", "stream_format": "sse"}'
 
 # Ask Local Ollama
 curl -N -X POST "http://127.0.0.1:8000/ask" \
@@ -313,9 +314,21 @@ curl -N -X POST "http://127.0.0.1:8000/ask" \
   -d '{"question": "Hello from local LLM!", "provider": "ollama"}'
 ```
 
-#### Error Handling:
-- **Rate Limit Exceeded (`503 Service Unavailable`)**: Returned if the LLM provider rate limits (429) persist after 3 retries with exponential backoff.
-- **Gateway Timeout (`504 Gateway Timeout`)**: Returned if generation exceeds the 30-second timeout threshold across retries.
+#### Error Handling & Citation Grounding Guarantees:
+- **Strict Grounding Validation (`validate_before_stream: true`)**:
+  - When enabled via payload (`"validate_before_stream": true`) or header (`X-Validate-Before-Stream: true`), the response is buffered in memory and completely verified before any token reaches the client.
+  - If citation verification fails (e.g. fabricated citations like `[fake.pdf, p. 99]` or uncited claims), the hallucinated text is completely suppressed and replaced with `"I do not know based on the provided documents."` (zero token leakage).
+- **Real-Time Streaming Grounding Defense (`validate_before_stream: false`)**:
+  - If streaming in real time and inline citation validation fails at stream completion:
+    - **Raw text mode**: Suppresses `Sources:` footer and appends an explicit revocation banner:
+      `[VALIDATION_FAILED: Grounding validation failed. The response above contains unverified citations or ungrounded claims.]`
+    - **SSE mode**: Suppresses `event: sources` / `event: done` and emits `event: error` with `{"error": "...", "validation_failed": true}`.
+    - Prevents hallucinated or unverified responses from being mistaken for successful grounded answers.
+- **Mid-Stream Provider Interruption Handling**: If a provider connection drops or fails midway after HTTP 200 headers have begun streaming:
+  - **SSE mode**: Emits a structured `event: error` with `{"error": "<sanitized_error>", "partial": true}` and suppresses `event: sources` / `event: done`.
+  - **Raw text mode**: Appends `\n\n[ERROR: Streaming generation interrupted: <sanitized_error>]\n` and suppresses the `Sources:` footer.
+- **Rate Limit Exceeded (`503 Service Unavailable`)**: Returned if the LLM provider rate limits (429) persist after 3 retries with exponential backoff before the stream starts.
+- **Gateway Timeout (`504 Gateway Timeout`)**: Returned if initial generation exceeds the timeout threshold across retries.
 - **Unsupported Provider (`400 Bad Request`)**: Returned if a non-supported provider name is passed.
 
 ---
@@ -461,13 +474,29 @@ uv run python scripts/eval_search.py
 
 ---
 
+## 🧠 Grounded Document Q&A / RAG (`POST /ask`)
+
+`POST /ask` implements Retrieval-Augmented Generation (RAG) grounded strictly on your ingested documents:
+
+- **Request**: `{"question": "...", "provider": "gemini" | "groq" | "ollama", "k": 5}`
+- **Retrieval & Relevance Gate**:
+  - Retrieves the top-`k` chunks from `READY` documents using pgvector cosine similarity (`search_chunks`).
+  - Filters chunks against `RAG_MIN_SIMILARITY_SCORE` (default `0.55`).
+  - If no documents are ready or no chunks meet the relevance floor, `/ask` immediately returns `"I don't know..."` without invoking the LLM.
+- **Strict Grounding & Citations**:
+  - Injects retrieved chunks with their file name and page number into a prompt-injection-resistant prompt (`app/rag.py`).
+  - Answers include inline `[filename, p. N]` citations plus a deduplicated `Sources:` footer (`- filename (page N)`).
+  - If the retrieved excerpts still do not contain the answer, the model responds `"I don't know."` and the `Sources:` footer is suppressed.
+
+---
+
 ## 🤖 Continuous Integration (CI) Checks
 
 The CI pipeline runs automatically on all pushes and pull requests via GitHub Actions (`.github/workflows/ci.yml`).
 
 ### Workflow Steps:
 1. **Lint & Code Style**: Runs `uv run ruff check .` to check for style violations, unformatted imports, and common programming errors.
-2. **Automated Testing**: Runs `uv run pytest` to execute the full unit and integration test suite (68 automated tests) against the in-memory SQLite database.
+2. **Database Migrations & Automated Testing**: Runs `uv run alembic upgrade head` against a `pgvector/pgvector:pg16` service container and executes the full test suite (75 automated tests, including a native PostgreSQL `pgvector` `<=>` integration test).
 
 ### Running CI Checks Locally:
 ```bash

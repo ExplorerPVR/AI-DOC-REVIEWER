@@ -2,7 +2,7 @@
 
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID, uuid4
 
 import sqlalchemy as sa
@@ -119,7 +119,10 @@ class ChunkBase(SQLModel):
         description="Source document file name",
     )
     page_number: int = SQLModelField(
-        description="1-based page number from the PDF document",
+        description=(
+            "1-based page number from PDF or DOCX (page breaks). "
+            "For reflowable documents without breaks, defaults to 1."
+        ),
     )
     chunk_index: int = SQLModelField(
         default=0,
@@ -168,7 +171,10 @@ class SearchResult(SQLModel):
         description="Source document file name",
     )
     page: int = SQLModelField(
-        description="1-based page number where the chunk appears",
+        description=(
+            "1-based page number where the chunk appears. "
+            "For unpaginated reflowable documents, reflects document page 1."
+        ),
     )
     score: float = SQLModelField(
         description="Cosine similarity score (higher is closer, range [0, 1])",
@@ -235,17 +241,40 @@ class LLMCallResponse(LLMCallBase):
 
 
 class AskRequest(BaseModel):
-    """Request payload schema for the POST /ask endpoint."""
+    """Request payload schema for the POST /ask RAG endpoint."""
 
     question: str = PydanticField(
         min_length=1,
-        description="Question or prompt to submit to the LLM",
-        examples=["Explain what a database index does in 2 sentences."],
+        max_length=2000,
+        description="Question to answer strictly from uploaded documents",
+        examples=["How do Masked Autoencoders scale with vision transformers?"],
     )
     provider: str = PydanticField(
         default="gemini",
         description="Target LLM provider (gemini, groq, or ollama)",
         examples=["gemini"],
+    )
+    k: int = PydanticField(
+        default=5,
+        ge=1,
+        le=20,
+        description="Number of closest document chunks to retrieve for RAG context",
+    )
+    stream_format: Literal["text", "sse"] = PydanticField(
+        default="text",
+        description=(
+            "Streaming protocol: 'text' for raw chunked text/plain, "
+            "or 'sse' for Server-Sent Events (text/event-stream) with structured "
+            "message, sources, and error events."
+        ),
+    )
+    validate_before_stream: bool = PydanticField(
+        default=False,
+        description=(
+            "When true, buffers and validates the complete answer before emitting "
+            "any tokens. Answers with fabricated citations or uncited claims are "
+            "safely suppressed and replaced with 'I don't know'."
+        ),
     )
 
 

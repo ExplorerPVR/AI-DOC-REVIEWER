@@ -77,6 +77,13 @@ def test_search_empty_query_returns_422(client: TestClient):
     assert "empty or whitespace" in resp_ws.json()["detail"].lower()
 
 
+def test_search_query_exceeding_max_length_returns_422(client: TestClient):
+    """Verify GET /search with query exceeding 2000 chars returns 422."""
+    oversized = "x" * 2001
+    resp = client.get(f"/search?q={oversized}")
+    assert resp.status_code == 422
+
+
 def test_search_no_documents_ready_returns_empty_list(
     client: TestClient, session: Session, monkeypatch: pytest.MonkeyPatch
 ):
@@ -241,7 +248,8 @@ def test_search_postgresql_pgvector_integration(monkeypatch: pytest.MonkeyPatch)
     if not pg_url.startswith("postgresql"):
         pytest.skip("PostgreSQL DATABASE_URL not configured for pgvector integration.")
 
-    pg_engine = create_engine(pg_url, pool_pre_ping=True)
+    connect_args = {"connect_timeout": 3} if "sqlite" not in pg_url else {}
+    pg_engine = create_engine(pg_url, connect_args=connect_args, pool_pre_ping=True)
     try:
         with pg_engine.connect() as conn:
             conn.execute(text("SELECT 1"))

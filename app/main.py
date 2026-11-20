@@ -1,11 +1,14 @@
 """FastAPI application entrypoint and routes for AI Document Assistant."""
 
+import asyncio
 import io
+import json
 import logging
 import os
 import re
 import zipfile
 from collections.abc import Iterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated
 from uuid import UUID, uuid4
@@ -19,6 +22,7 @@ from fastapi import (
     File,
     HTTPException,
     Query,
+    Request,
     UploadFile,
     status,
 )
@@ -27,7 +31,11 @@ from sqlmodel import Session, select
 
 from app.db import get_session
 from app.extractor import extract_resume_data
-from app.ingestion import ingest_document_pdf, search_chunks
+from app.ingestion import (
+    ingest_document_pdf,
+    sanitize_error_message,
+    search_chunks,
+)
 from app.llm import (
     LLMError,
     LLMRateLimitError,
@@ -49,6 +57,15 @@ from app.models import (
     SearchResult,
 )
 from app.pricing import DEFAULT_MODELS
+from app.rag import (
+    NO_ANSWER_MESSAGE,
+    RAG_SYSTEM_INSTRUCTIONS,
+    build_rag_prompt,
+    filter_relevant_chunks,
+    format_sources_footer,
+    is_refusal_answer,
+    validate_inline_citations,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +77,29 @@ CHUNK_SIZE_BYTES: int = 1024 * 1024  # 1 MB read chunk size
 ALLOWED_EXTENSIONS: set[str] = {".pdf", ".txt", ".docx"}
 UPLOAD_DIR: Path = Path(os.getenv("UPLOAD_DIR", "uploads"))
 
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Lifespan context manager for startup pre-warming and cleanup."""
+    async def _prewarm_ollama():
+        base_url = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
+        model = os.getenv("OLLAMA_MODEL", "llama3")
+        try:
+            import httpx
+
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                await client.post(
+                    f"{base_url}/api/generate",
+                    json={"model": model, "keep_alive": "24h"},
+                )
+                logger.info("Local Ollama model '%s' pre-warmed successfully.", model)
+        except Exception as exc:
+            logger.debug("Ollama pre-warm skipped: %s", exc)
+
+    asyncio.create_task(_prewarm_ollama())
+    yield
+
+
 app = FastAPI(
     title="AI Document Assistant",
     description=(
@@ -69,6 +109,7 @@ app = FastAPI(
     version="0.3.0",
     docs_url="/docs",
     redoc_url="/redoc",
+    lifespan=lifespan,
 )
 
 
@@ -183,6 +224,7 @@ async def health_check() -> HealthResponse:
         409: {"model": ErrorResponse, "description": "Duplicate filename"},
         413: {"model": ErrorResponse, "description": "File exceeds 10 MB maximum size"},
         415: {"model": ErrorResponse, "description": "Unsupported file extension"},
+        503: {"model": ErrorResponse, "description": "Database service unavailable"},
     },
     tags=["Documents"],
 )
@@ -251,10 +293,8 @@ async def upload_document(
     # 6. Extract content type with fallback
     content_type = file.content_type or "application/octet-stream"
 
-    # 7. Initial status: pending for PDF (background ingestion), ready for others
-    initial_status = (
-        DocumentStatus.PENDING if extension == ".pdf" else DocumentStatus.READY
-    )
+    # 7. Initial status: pending for background ingestion across all file types
+    initial_status = DocumentStatus.PENDING
 
     # 8. Generate document UUID upfront to bind file path and database record
     doc_id = uuid4()
@@ -314,13 +354,12 @@ async def upload_document(
         )
         raise
 
-    # 12. Schedule background ingestion for PDFs
-    if extension == ".pdf":
-        background_tasks.add_task(
-            ingest_document_pdf,
-            document_id=doc_record.id,
-            file_path=str(destination),
-        )
+    # 12. Schedule background ingestion across all supported types (.pdf, .txt, .docx)
+    background_tasks.add_task(
+        ingest_document_pdf,
+        document_id=doc_record.id,
+        file_path=str(destination),
+    )
 
     return doc_record
 
@@ -331,6 +370,9 @@ async def upload_document(
     status_code=status.HTTP_200_OK,
     summary="List Documents",
     description="Retrieve metadata for all uploaded documents stored in PostgreSQL.",
+    responses={
+        503: {"model": ErrorResponse, "description": "Database service unavailable"},
+    },
     tags=["Documents"],
 )
 def list_documents(
@@ -348,6 +390,10 @@ def list_documents(
     status_code=status.HTTP_200_OK,
     summary="Get Document Details",
     description="Retrieve metadata and ingestion status for a single document.",
+    responses={
+        404: {"model": ErrorResponse, "description": "Document not found"},
+        503: {"model": ErrorResponse, "description": "Database service unavailable"},
+    },
     tags=["Documents"],
 )
 def get_document(
@@ -370,6 +416,10 @@ def get_document(
     status_code=status.HTTP_200_OK,
     summary="Get Document Chunks",
     description="Retrieve all text chunks generated for an ingested document.",
+    responses={
+        404: {"model": ErrorResponse, "description": "Document not found"},
+        503: {"model": ErrorResponse, "description": "Database service unavailable"},
+    },
     tags=["Documents"],
 )
 def get_document_chunks(
@@ -402,6 +452,10 @@ def get_document_chunks(
         "Search ingested document chunks by semantic cosine distance using "
         "pgvector's <=> operator, returning the top k most relevant matches."
     ),
+    responses={
+        422: {"model": ErrorResponse, "description": "Invalid search parameters"},
+        503: {"model": ErrorResponse, "description": "Database service unavailable"},
+    },
     tags=["Search"],
 )
 def search_documents(
@@ -409,6 +463,7 @@ def search_documents(
         str,
         Query(
             min_length=1,
+            max_length=2000,
             description="Search query question to embed and search",
         ),
     ],
@@ -434,20 +489,30 @@ def search_documents(
 
 @app.post(
     "/ask",
-    summary="Ask an LLM",
+    summary="Ask Your Documents (RAG)",
     description=(
-        "Stream completion answers from configured LLM providers "
-        "(gemini, groq, ollama) with automatic retries and cost logging."
+        "Answer questions strictly from ingested documents using semantic retrieval "
+        "(pgvector) and grounded LLM generation with source file & page citations "
+        "(page-level for PDF/paginated DOCX, document page 1 for unpaginated text). "
+        "Supports chunked text/plain or Server-Sent Events (SSE) streaming with "
+        "structured error communication. Returns \"I don't know\" when no relevant "
+        "document context is found."
     ),
     responses={
         200: {
-            "description": "Streamed text response chunks from the LLM provider",
-            "content": {"text/plain": {}},
+            "description": (
+                "Chunked streaming response containing answer tokens and source "
+                "citations, or SSE event stream with structured errors."
+            ),
+            "content": {
+                "text/plain": {},
+                "text/event-stream": {},
+            },
         },
         400: {"model": ErrorResponse, "description": "Invalid question or provider"},
         503: {
             "model": ErrorResponse,
-            "description": "LLM provider unavailable or rate-limited",
+            "description": "Embedding or LLM provider unavailable or rate-limited",
         },
         504: {
             "model": ErrorResponse,
@@ -459,8 +524,9 @@ def search_documents(
 def ask_llm(
     request: AskRequest,
     session: Annotated[Session, Depends(get_session)],
+    raw_request: Request,
 ) -> StreamingResponse:
-    """Stream response from selected LLM provider and persist call metrics."""
+    """Answer strictly from ingested documents with citations and 'I don't know'."""
     question = (request.question or "").strip()
     if not question:
         raise HTTPException(
@@ -468,7 +534,9 @@ def ask_llm(
             detail="The 'question' field cannot be empty.",
         )
 
-    provider = (request.provider or "gemini").lower().strip()
+    provider = (
+        request.provider or os.getenv("DEFAULT_LLM_PROVIDER", "gemini")
+    ).lower().strip()
     if provider not in DEFAULT_MODELS:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -478,8 +546,69 @@ def ask_llm(
             ),
         )
 
+    # Determine whether client requested SSE or raw text streaming
+    accept_header = raw_request.headers.get("accept", "").lower()
+    use_sse = (
+        request.stream_format == "sse"
+        or "text/event-stream" in accept_header
+    )
+    validate_before_stream = (
+        request.validate_before_stream
+        or raw_request.headers.get("x-validate-before-stream", "").lower() == "true"
+    )
+
+    # 1. Retrieve top-k relevant document chunks from pgvector
     try:
-        gen = generate(prompt=question, provider=provider, session=session)
+        retrieved_chunks = search_chunks(
+            query=question,
+            k=request.k,
+            session=session,
+        )
+    except Exception as exc:
+        logger.error("Failed to retrieve document chunks for /ask: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Document search service unavailable: {exc}",
+        ) from exc
+
+    # 2. Enforce relevance threshold: short-circuit 'I don't know' without calling LLM
+    relevant_chunks = filter_relevant_chunks(retrieved_chunks)
+    if not relevant_chunks:
+        if use_sse:
+            def sse_no_answer() -> Iterator[str]:
+                payload = json.dumps({"text": NO_ANSWER_MESSAGE})
+                yield f"event: message\ndata: {payload}\n\n"
+                yield "event: done\ndata: [DONE]\n\n"
+
+            return StreamingResponse(
+                sse_no_answer(),
+                media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "Connection": "keep-alive",
+                    "X-Accel-Buffering": "no",
+                },
+            )
+        return StreamingResponse(
+            iter([NO_ANSWER_MESSAGE]),
+            media_type="text/plain",
+        )
+
+    # 3. Build strict grounded prompt with file & page metadata
+    rag_user_prompt = build_rag_prompt(
+        question=question,
+        chunks=relevant_chunks,
+        include_system_instructions=False,
+    )
+
+    try:
+        gen = generate(
+            prompt=rag_user_prompt,
+            provider=provider,
+            session=session,
+            logged_prompt=question,
+            system_instruction=RAG_SYSTEM_INSTRUCTIONS,
+        )
         # Trigger connection & retry loop before sending 200 header
         first_chunk = next(gen, None)
     except LLMTimeoutError as exc:
@@ -503,17 +632,191 @@ def ask_llm(
             detail=f"Unexpected error communicating with LLM: {exc}",
         ) from exc
 
-    def stream_content() -> Iterator[str]:
+    # Pre-validation mode: buffer & validate full answer before emitting any token
+    if validate_before_stream:
+        buffered_chunks: list[str] = []
         if first_chunk:
-            yield first_chunk
+            buffered_chunks.append(first_chunk)
         try:
             for chunk in gen:
                 if chunk:
+                    buffered_chunks.append(chunk)
+        except Exception as err:
+            logger.error("Error during pre-validation generation: %s", err)
+            safe_err = sanitize_error_message(err)
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=f"LLM generation failed: {safe_err}",
+            ) from err
+
+        full_answer = "".join(buffered_chunks)
+
+        # Refusal answers bypass citation check and return refusal text
+        if not full_answer.strip() or is_refusal_answer(full_answer):
+            def stream_prevalidated_refusal() -> Iterator[str]:
+                out = full_answer if full_answer.strip() else NO_ANSWER_MESSAGE
+                if use_sse:
+                    yield f"event: message\ndata: {json.dumps({'text': out})}\n\n"
+                    yield "event: done\ndata: [DONE]\n\n"
+                else:
+                    yield out
+
+            media_type = "text/event-stream" if use_sse else "text/plain"
+            return StreamingResponse(
+                stream_prevalidated_refusal(), media_type=media_type
+            )
+
+        # Check inline citations against retrieved document chunks
+        if not validate_inline_citations(
+            full_answer, relevant_chunks, require_citation=True
+        ):
+            logger.warning(
+                "Suppressed ungrounded answer during pre-stream validation."
+            )
+            def stream_grounding_refusal() -> Iterator[str]:
+                if use_sse:
+                    err_payload = json.dumps({
+                        "error": (
+                            "Answer failed grounding validation: "
+                            "citations could not be verified."
+                        ),
+                        "validation_failed": True,
+                    })
+                    yield f"event: error\ndata: {err_payload}\n\n"
+                else:
+                    yield NO_ANSWER_MESSAGE
+
+            media_type = "text/event-stream" if use_sse else "text/plain"
+            return StreamingResponse(
+                stream_grounding_refusal(), media_type=media_type
+            )
+
+        # Valid answer: stream verified chunks + sources footer
+        sources_footer = format_sources_footer(relevant_chunks)
+        def stream_prevalidated_success() -> Iterator[str]:
+            for chunk in buffered_chunks:
+                if use_sse:
+                    yield f"event: message\ndata: {json.dumps({'text': chunk})}\n\n"
+                else:
                     yield chunk
+            if sources_footer:
+                if use_sse:
+                    source_items = [
+                        {"filename": c.filename, "page": c.page}
+                        for c in relevant_chunks
+                    ]
+                    sources_payload = json.dumps(
+                        {"sources": source_items, "footer": sources_footer}
+                    )
+                    yield f"event: sources\ndata: {sources_payload}\n\n"
+                else:
+                    yield sources_footer
+            if use_sse:
+                yield "event: done\ndata: [DONE]\n\n"
+
+        media_type = "text/event-stream" if use_sse else "text/plain"
+        headers = (
+            {
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            }
+            if use_sse
+            else None
+        )
+        return StreamingResponse(
+            stream_prevalidated_success(),
+            media_type=media_type,
+            headers=headers,
+        )
+
+    # Real-time streaming mode: stream tokens as they arrive
+    def stream_content() -> Iterator[str]:
+        collected: list[str] = []
+        stream_failed = False
+        if first_chunk:
+            collected.append(first_chunk)
+            if use_sse:
+                yield f"event: message\ndata: {json.dumps({'text': first_chunk})}\n\n"
+            else:
+                yield first_chunk
+        try:
+            for chunk in gen:
+                if chunk:
+                    collected.append(chunk)
+                    if use_sse:
+                        yield f"event: message\ndata: {json.dumps({'text': chunk})}\n\n"
+                    else:
+                        yield chunk
         except Exception as err:
             logger.error("Error during streaming generation: %s", err)
+            stream_failed = True
+            safe_err = sanitize_error_message(err)
+            if use_sse:
+                yield (
+                    f"event: error\n"
+                    f"data: {json.dumps({'error': safe_err, 'partial': True})}\n\n"
+                )
+            else:
+                yield f"\n\n[ERROR: Streaming generation interrupted: {safe_err}]\n"
+            return
 
-    return StreamingResponse(stream_content(), media_type="text/plain")
+        if stream_failed:
+            return
+
+        full_answer = "".join(collected)
+        if full_answer.strip() and not is_refusal_answer(full_answer):
+            if validate_inline_citations(
+                full_answer, relevant_chunks, require_citation=True
+            ):
+                sources_footer = format_sources_footer(relevant_chunks)
+                if sources_footer:
+                    if use_sse:
+                        source_items = [
+                            {"filename": c.filename, "page": c.page}
+                            for c in relevant_chunks
+                        ]
+                        sources_payload = json.dumps(
+                            {"sources": source_items, "footer": sources_footer}
+                        )
+                        yield f"event: sources\ndata: {sources_payload}\n\n"
+                    else:
+                        yield sources_footer
+            else:
+                logger.warning(
+                    "Suppressed sources footer: answer has ungrounded citations."
+                )
+                if use_sse:
+                    err_payload = json.dumps({
+                        "error": (
+                            "Grounding validation failed: response contains "
+                            "unverified citations or ungrounded claims."
+                        ),
+                        "validation_failed": True,
+                    })
+                    yield f"event: error\ndata: {err_payload}\n\n"
+                else:
+                    yield (
+                        "\n\n[VALIDATION_FAILED: Grounding validation failed. "
+                        "The response above contains unverified citations or "
+                        "ungrounded claims.]\n"
+                    )
+                return
+
+        if use_sse:
+            yield "event: done\ndata: [DONE]\n\n"
+
+    media_type = "text/event-stream" if use_sse else "text/plain"
+    headers = (
+        {
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        }
+        if use_sse
+        else None
+    )
+    return StreamingResponse(stream_content(), media_type=media_type, headers=headers)
 
 
 @app.post(
@@ -561,8 +864,11 @@ def extract_resume(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="The resume 'text' field cannot be empty.",
         )
+    provider = (
+        request.provider or os.getenv("DEFAULT_LLM_PROVIDER", "gemini")
+    ).lower().strip()
     return extract_resume_data(
         resume_text=content,
-        provider=request.provider,
+        provider=provider,
         session=session,
     )

@@ -103,6 +103,128 @@ def read_pdf_pages(file_path: str | Path) -> list[tuple[int, str]]:
         doc.close()
 
 
+def read_txt_pages(file_path: str | Path) -> list[tuple[int, str]]:
+    """Extract page number (1) and text from a plain text (.txt) file.
+
+    Raises:
+        ValueError: If file is missing, cannot be decoded, or has no text.
+    """
+    path = Path(file_path)
+    if not path.is_file():
+        raise ValueError(f"File not found on disk: {file_path}")
+
+    try:
+        text = path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        try:
+            text = path.read_text(encoding="latin-1")
+        except Exception as exc:
+            raise ValueError(f"Corrupted or unreadable text file: {exc}") from exc
+
+    cleaned = text.strip()
+    if not cleaned:
+        raise ValueError("The uploaded text file contains no extractable text.")
+
+    return [(1, cleaned)]
+
+
+def read_docx_pages(file_path: str | Path) -> list[tuple[int, str]]:
+    """Extract 1-based page numbers and text from a Word document (.docx).
+
+    Preserves page boundaries by detecting explicit hard page breaks
+    (<w:br w:type="page"/>) and soft break hints (<w:lastRenderedPageBreak/>)
+    rendered by word processors. For reflowable documents without explicit
+    page breaks, content is indexed under page 1.
+
+    Raises:
+        ValueError: If file is missing, corrupted, or has no extractable text.
+    """
+    from docx import Document as DocxDocument
+    from docx.table import Table
+    from docx.text.paragraph import Paragraph
+
+    path = Path(file_path)
+    if not path.is_file():
+        raise ValueError(f"File not found on disk: {file_path}")
+
+    try:
+        doc = DocxDocument(str(path))
+    except Exception as exc:
+        raise ValueError(f"Corrupted or unreadable DOCX: {exc}") from exc
+
+    pages_dict: dict[int, list[str]] = {}
+    current_page = 1
+
+    try:
+        for el in doc.element.body:
+            tag = el.tag.split("}")[-1]
+            if tag == "p":
+                p = Paragraph(el, doc)
+                p_text_parts: list[str] = []
+                for run in p.runs:
+                    run_breaks = run._r.xpath(
+                        ".//w:br[@w:type='page'] | .//w:lastRenderedPageBreak"
+                    )
+                    if run_breaks:
+                        if p_text_parts:
+                            flush_text = "".join(p_text_parts).strip()
+                            if flush_text:
+                                pages_dict.setdefault(current_page, []).append(
+                                    flush_text
+                                )
+                            p_text_parts = []
+                        current_page += len(run_breaks)
+                    p_text_parts.append(run.text)
+
+                if not p.runs:
+                    breaks = el.xpath(
+                        ".//w:br[@w:type='page'] | .//w:lastRenderedPageBreak"
+                    )
+                    if breaks:
+                        current_page += len(breaks)
+                elif p_text_parts:
+                    flush_text = "".join(p_text_parts).strip()
+                    if flush_text:
+                        pages_dict.setdefault(current_page, []).append(flush_text)
+
+            elif tag == "tbl":
+                tbl = Table(el, doc)
+                for row in tbl.rows:
+                    cells = [c.text.strip() for c in row.cells if c.text.strip()]
+                    if cells:
+                        pages_dict.setdefault(current_page, []).append(
+                            " | ".join(cells)
+                        )
+
+        result: list[tuple[int, str]] = []
+        for page_num in sorted(pages_dict.keys()):
+            page_text = "\n\n".join(pages_dict[page_num]).strip()
+            if page_text:
+                result.append((page_num, page_text))
+
+        if not result:
+            raise ValueError("The uploaded DOCX contains no extractable text.")
+
+        return result
+    except Exception as exc:
+        if isinstance(exc, ValueError):
+            raise
+        raise ValueError(f"Corrupted or unreadable DOCX: {exc}") from exc
+
+
+def read_document_pages(file_path: str | Path) -> list[tuple[int, str]]:
+    """Extract page numbers and text across supported formats (.pdf, .txt, .docx)."""
+    path = Path(file_path)
+    ext = path.suffix.lower()
+    if ext == ".pdf":
+        return read_pdf_pages(path)
+    if ext == ".txt":
+        return read_txt_pages(path)
+    if ext == ".docx":
+        return read_docx_pages(path)
+    raise ValueError(f"Unsupported document format: '{ext}'")
+
+
 def _dehyphenate_match(m: re.Match) -> str:
     """Smartly reassemble hyphenated words split across PDF line breaks."""
     w1, w2 = m.group(1), m.group(2)
@@ -393,13 +515,13 @@ def ingest_document_pdf(
         filename,
     )
 
-    # Phase 2: Compute & Network (PDF parsing, text chunking, external API embeddings)
+    # Phase 2: Compute & Network (Document parsing, chunking, external API embeddings)
     # NO DB CONNECTION IS HELD DURING THIS PHASE!
     error: Exception | None = None
     chunk_records_data: list[tuple[int, int, str, list[float]]] = []
 
     try:
-        pages = read_pdf_pages(file_path)
+        pages = read_document_pages(file_path)
         all_chunks: list[tuple[int, int, str]] = []
         chunk_idx = 0
         for page_num, page_text in pages:
@@ -409,7 +531,7 @@ def ingest_document_pdf(
                 chunk_idx += 1
 
         if not all_chunks:
-            raise ValueError("No extractable chunks found in PDF document.")
+            raise ValueError("No extractable chunks found in document.")
 
         # Batch embed all chunks across external network
         chunk_texts = [item[2] for item in all_chunks]
@@ -465,6 +587,10 @@ def ingest_document_pdf(
                 filename,
                 len(chunk_records_data),
             )
+
+
+# Alias for generalized multi-format document ingestion (.pdf, .txt, .docx)
+ingest_document = ingest_document_pdf
 
 
 def search_chunks(
