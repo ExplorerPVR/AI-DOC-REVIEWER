@@ -786,3 +786,105 @@ def test_ask_question_exceeding_max_length_rejected(client: TestClient):
         json={"question": oversized_question, "provider": "gemini"},
     )
     assert resp.status_code == 422
+
+
+def test_ask_mid_stream_exception_communicates_text_error(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+):
+    """Verify mid-stream exception yields clear error marker in text mode."""
+
+    def mock_broken_stream(*args, **kwargs):
+        yield "Initial partial response."
+        raise RuntimeError("Provider connection aborted mid-stream")
+
+    monkeypatch.setattr(llm_module, "_stream_gemini", mock_broken_stream)
+
+    resp = client.post(
+        "/ask",
+        json={"question": "What is in guide?", "provider": "gemini"},
+    )
+    assert resp.status_code == 200
+    assert "Initial partial response." in resp.text
+    expected_err = (
+        "[ERROR: Streaming generation interrupted: "
+        "Provider connection aborted mid-stream]"
+    )
+    assert expected_err in resp.text
+    assert "Sources:" not in resp.text
+
+
+def test_ask_mid_stream_exception_communicates_sse_error(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+):
+    """Verify mid-stream exception yields structured SSE error event."""
+
+    def mock_broken_stream(*args, **kwargs):
+        yield "Partial SSE response chunk."
+        raise RuntimeError("Groq token limit reached mid-stream")
+
+    monkeypatch.setattr(llm_module, "_stream_gemini", mock_broken_stream)
+
+    resp = client.post(
+        "/ask",
+        json={
+            "question": "What is in guide?",
+            "provider": "gemini",
+            "stream_format": "sse",
+        },
+    )
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("text/event-stream")
+    assert "event: message" in resp.text
+    assert "Partial SSE response chunk." in resp.text
+    assert "event: error" in resp.text
+    assert '"partial": true' in resp.text
+    assert "Groq token limit reached mid-stream" in resp.text
+    assert "event: sources" not in resp.text
+    assert "event: done" not in resp.text
+
+
+def test_ask_sse_success_with_sources_and_done(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+):
+    """Verify successful SSE generation produces message, sources, and done events."""
+
+    def mock_clean_stream(*args, **kwargs):
+        yield "First chunk "
+        yield "with citation [guide.pdf, p. 2]."
+
+    monkeypatch.setattr(llm_module, "_stream_gemini", mock_clean_stream)
+
+    resp = client.post(
+        "/ask",
+        headers={"Accept": "text/event-stream"},
+        json={"question": "What is in guide?", "provider": "gemini"},
+    )
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("text/event-stream")
+    assert "event: message" in resp.text
+    assert "First chunk" in resp.text
+    assert "event: sources" in resp.text
+    assert "guide.pdf" in resp.text
+    assert "event: done" in resp.text
+    assert "[DONE]" in resp.text
+
+
+def test_ask_sse_relevance_short_circuit(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+):
+    """Verify SSE returns message and done events when no chunks match."""
+    monkeypatch.setattr(main_module, "search_chunks", lambda *args, **kwargs: [])
+
+    resp = client.post(
+        "/ask",
+        json={
+            "question": "Completely irrelevant query",
+            "provider": "gemini",
+            "stream_format": "sse",
+        },
+    )
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("text/event-stream")
+    assert "event: message" in resp.text
+    assert "i don't know" in resp.text.lower()
+    assert "event: done" in resp.text

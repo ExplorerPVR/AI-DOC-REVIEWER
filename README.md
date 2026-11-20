@@ -294,18 +294,19 @@ Streams answers from configured LLM providers (Gemini, Groq, Ollama) with automa
 
 - **URL**: `POST /ask`
 - **Content-Type**: `application/json`
-- **Transfer-Encoding**: `chunked` (text/plain streaming)
+- **Transfer-Encoding**: `chunked` (`text/plain` streaming by default, or Server-Sent Events with `"stream_format": "sse"` or `Accept: text/event-stream`)
 
 ```bash
-# Ask Gemini (default)
+# Ask Gemini (default plain text streaming)
 curl -N -X POST "http://127.0.0.1:8000/ask" \
   -H "Content-Type: application/json" \
   -d '{"question": "What is the difference between SQL and NoSQL in two sentences?", "provider": "gemini"}'
 
-# Ask Groq
+# Ask with Server-Sent Events (SSE)
 curl -N -X POST "http://127.0.0.1:8000/ask" \
   -H "Content-Type: application/json" \
-  -d '{"question": "Explain Docker containers briefly.", "provider": "groq"}'
+  -H "Accept: text/event-stream" \
+  -d '{"question": "Explain Docker containers briefly.", "provider": "groq", "stream_format": "sse"}'
 
 # Ask Local Ollama
 curl -N -X POST "http://127.0.0.1:8000/ask" \
@@ -313,9 +314,13 @@ curl -N -X POST "http://127.0.0.1:8000/ask" \
   -d '{"question": "Hello from local LLM!", "provider": "ollama"}'
 ```
 
-#### Error Handling:
-- **Rate Limit Exceeded (`503 Service Unavailable`)**: Returned if the LLM provider rate limits (429) persist after 3 retries with exponential backoff.
-- **Gateway Timeout (`504 Gateway Timeout`)**: Returned if generation exceeds the 30-second timeout threshold across retries.
+#### Error Handling & Mid-Stream Failure Communication:
+- **Rate Limit Exceeded (`503 Service Unavailable`)**: Returned if the LLM provider rate limits (429) persist after 3 retries with exponential backoff before the stream starts.
+- **Gateway Timeout (`504 Gateway Timeout`)**: Returned if initial generation exceeds the timeout threshold across retries.
+- **Mid-Stream Provider Interruption Handling**: If a provider connection drops or fails midway after HTTP 200 headers have begun streaming:
+  - **SSE mode**: Emits a structured `event: error` with `{"error": "<sanitized_error>", "partial": true}` and suppresses `event: sources` / `event: done`.
+  - **Raw text mode**: Appends `\n\n[ERROR: Streaming generation interrupted: <sanitized_error>]\n` and suppresses the `Sources:` footer.
+  - This ensures upstream clients or automated pipelines never mistake an aborted generation for a complete, successful answer.
 - **Unsupported Provider (`400 Bad Request`)**: Returned if a non-supported provider name is passed.
 
 ---

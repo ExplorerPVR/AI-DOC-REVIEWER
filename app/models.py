@@ -2,7 +2,7 @@
 
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID, uuid4
 
 import sqlalchemy as sa
@@ -259,6 +259,14 @@ class AskRequest(BaseModel):
         ge=1,
         le=20,
         description="Number of closest document chunks to retrieve for RAG context",
+    )
+    stream_format: Literal["text", "sse"] = PydanticField(
+        default="text",
+        description=(
+            "Streaming protocol: 'text' for raw chunked text/plain, "
+            "or 'sse' for Server-Sent Events (text/event-stream) with structured "
+            "message, sources, and error events."
+        ),
     )
 
 

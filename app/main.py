@@ -2,6 +2,7 @@
 
 import asyncio
 import io
+import json
 import logging
 import os
 import re
@@ -21,6 +22,7 @@ from fastapi import (
     File,
     HTTPException,
     Query,
+    Request,
     UploadFile,
     status,
 )
@@ -29,7 +31,11 @@ from sqlmodel import Session, select
 
 from app.db import get_session
 from app.extractor import extract_resume_data
-from app.ingestion import ingest_document_pdf, search_chunks
+from app.ingestion import (
+    ingest_document_pdf,
+    sanitize_error_message,
+    search_chunks,
+)
 from app.llm import (
     LLMError,
     LLMRateLimitError,
@@ -488,15 +494,20 @@ def search_documents(
         "Answer questions strictly from ingested documents using semantic retrieval "
         "(pgvector) and grounded LLM generation with source file & page citations "
         "(page-level for PDF/paginated DOCX, document page 1 for unpaginated text). "
-        "Returns \"I don't know\" when no relevant document context is found."
+        "Supports chunked text/plain or Server-Sent Events (SSE) streaming with "
+        "structured error communication. Returns \"I don't know\" when no relevant "
+        "document context is found."
     ),
     responses={
         200: {
             "description": (
-                "Streamed grounded answer with source file and page citations, "
-                "or an \"I don't know\" response when unsupported by documents."
+                "Chunked streaming response containing answer tokens and source "
+                "citations, or SSE event stream with structured errors."
             ),
-            "content": {"text/plain": {}},
+            "content": {
+                "text/plain": {},
+                "text/event-stream": {},
+            },
         },
         400: {"model": ErrorResponse, "description": "Invalid question or provider"},
         503: {
@@ -513,6 +524,7 @@ def search_documents(
 def ask_llm(
     request: AskRequest,
     session: Annotated[Session, Depends(get_session)],
+    raw_request: Request,
 ) -> StreamingResponse:
     """Answer strictly from ingested documents with citations and 'I don't know'."""
     question = (request.question or "").strip()
@@ -534,6 +546,13 @@ def ask_llm(
             ),
         )
 
+    # Determine whether client requested SSE or raw text streaming
+    accept_header = raw_request.headers.get("accept", "").lower()
+    use_sse = (
+        request.stream_format == "sse"
+        or "text/event-stream" in accept_header
+    )
+
     # 1. Retrieve top-k relevant document chunks from pgvector
     try:
         retrieved_chunks = search_chunks(
@@ -551,6 +570,21 @@ def ask_llm(
     # 2. Enforce relevance threshold: short-circuit 'I don't know' without calling LLM
     relevant_chunks = filter_relevant_chunks(retrieved_chunks)
     if not relevant_chunks:
+        if use_sse:
+            def sse_no_answer() -> Iterator[str]:
+                payload = json.dumps({"text": NO_ANSWER_MESSAGE})
+                yield f"event: message\ndata: {payload}\n\n"
+                yield "event: done\ndata: [DONE]\n\n"
+
+            return StreamingResponse(
+                sse_no_answer(),
+                media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "Connection": "keep-alive",
+                    "X-Accel-Buffering": "no",
+                },
+            )
         return StreamingResponse(
             iter([NO_ANSWER_MESSAGE]),
             media_type="text/plain",
@@ -596,30 +630,74 @@ def ask_llm(
 
     def stream_content() -> Iterator[str]:
         collected: list[str] = []
+        stream_failed = False
         if first_chunk:
             collected.append(first_chunk)
-            yield first_chunk
+            if use_sse:
+                yield f"event: message\ndata: {json.dumps({'text': first_chunk})}\n\n"
+            else:
+                yield first_chunk
         try:
             for chunk in gen:
                 if chunk:
                     collected.append(chunk)
-                    yield chunk
+                    if use_sse:
+                        yield f"event: message\ndata: {json.dumps({'text': chunk})}\n\n"
+                    else:
+                        yield chunk
         except Exception as err:
             logger.error("Error during streaming generation: %s", err)
+            stream_failed = True
+            safe_err = sanitize_error_message(err)
+            if use_sse:
+                yield (
+                    f"event: error\n"
+                    f"data: {json.dumps({'error': safe_err, 'partial': True})}\n\n"
+                )
+            else:
+                yield f"\n\n[ERROR: Streaming generation interrupted: {safe_err}]\n"
+            return
+
+        if stream_failed:
             return
 
         full_answer = "".join(collected)
         if full_answer.strip() and not is_refusal_answer(full_answer):
-            if validate_inline_citations(full_answer, relevant_chunks):
+            if validate_inline_citations(
+                full_answer, relevant_chunks, require_citation=True
+            ):
                 sources_footer = format_sources_footer(relevant_chunks)
                 if sources_footer:
-                    yield sources_footer
+                    if use_sse:
+                        source_items = [
+                            {"filename": c.filename, "page": c.page}
+                            for c in relevant_chunks
+                        ]
+                        sources_payload = json.dumps(
+                            {"sources": source_items, "footer": sources_footer}
+                        )
+                        yield f"event: sources\ndata: {sources_payload}\n\n"
+                    else:
+                        yield sources_footer
             else:
                 logger.warning(
                     "Suppressed sources footer: answer has ungrounded citations."
                 )
 
-    return StreamingResponse(stream_content(), media_type="text/plain")
+        if use_sse:
+            yield "event: done\ndata: [DONE]\n\n"
+
+    media_type = "text/event-stream" if use_sse else "text/plain"
+    headers = (
+        {
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        }
+        if use_sse
+        else None
+    )
+    return StreamingResponse(stream_content(), media_type=media_type, headers=headers)
 
 
 @app.post(
