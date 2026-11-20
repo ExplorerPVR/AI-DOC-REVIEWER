@@ -268,6 +268,14 @@ class AskRequest(BaseModel):
             "message, sources, and error events."
         ),
     )
+    validate_before_stream: bool = PydanticField(
+        default=False,
+        description=(
+            "When true, buffers and validates the complete answer before emitting "
+            "any tokens. Answers with fabricated citations or uncited claims are "
+            "safely suppressed and replaced with 'I don't know'."
+        ),
+    )
 
 
 class ErrorResponse(BaseModel):

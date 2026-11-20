@@ -552,6 +552,10 @@ def ask_llm(
         request.stream_format == "sse"
         or "text/event-stream" in accept_header
     )
+    validate_before_stream = (
+        request.validate_before_stream
+        or raw_request.headers.get("x-validate-before-stream", "").lower() == "true"
+    )
 
     # 1. Retrieve top-k relevant document chunks from pgvector
     try:
@@ -628,6 +632,105 @@ def ask_llm(
             detail=f"Unexpected error communicating with LLM: {exc}",
         ) from exc
 
+    # Pre-validation mode: buffer & validate full answer before emitting any token
+    if validate_before_stream:
+        buffered_chunks: list[str] = []
+        if first_chunk:
+            buffered_chunks.append(first_chunk)
+        try:
+            for chunk in gen:
+                if chunk:
+                    buffered_chunks.append(chunk)
+        except Exception as err:
+            logger.error("Error during pre-validation generation: %s", err)
+            safe_err = sanitize_error_message(err)
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=f"LLM generation failed: {safe_err}",
+            ) from err
+
+        full_answer = "".join(buffered_chunks)
+
+        # Refusal answers bypass citation check and return refusal text
+        if not full_answer.strip() or is_refusal_answer(full_answer):
+            def stream_prevalidated_refusal() -> Iterator[str]:
+                out = full_answer if full_answer.strip() else NO_ANSWER_MESSAGE
+                if use_sse:
+                    yield f"event: message\ndata: {json.dumps({'text': out})}\n\n"
+                    yield "event: done\ndata: [DONE]\n\n"
+                else:
+                    yield out
+
+            media_type = "text/event-stream" if use_sse else "text/plain"
+            return StreamingResponse(
+                stream_prevalidated_refusal(), media_type=media_type
+            )
+
+        # Check inline citations against retrieved document chunks
+        if not validate_inline_citations(
+            full_answer, relevant_chunks, require_citation=True
+        ):
+            logger.warning(
+                "Suppressed ungrounded answer during pre-stream validation."
+            )
+            def stream_grounding_refusal() -> Iterator[str]:
+                if use_sse:
+                    err_payload = json.dumps({
+                        "error": (
+                            "Answer failed grounding validation: "
+                            "citations could not be verified."
+                        ),
+                        "validation_failed": True,
+                    })
+                    yield f"event: error\ndata: {err_payload}\n\n"
+                else:
+                    yield NO_ANSWER_MESSAGE
+
+            media_type = "text/event-stream" if use_sse else "text/plain"
+            return StreamingResponse(
+                stream_grounding_refusal(), media_type=media_type
+            )
+
+        # Valid answer: stream verified chunks + sources footer
+        sources_footer = format_sources_footer(relevant_chunks)
+        def stream_prevalidated_success() -> Iterator[str]:
+            for chunk in buffered_chunks:
+                if use_sse:
+                    yield f"event: message\ndata: {json.dumps({'text': chunk})}\n\n"
+                else:
+                    yield chunk
+            if sources_footer:
+                if use_sse:
+                    source_items = [
+                        {"filename": c.filename, "page": c.page}
+                        for c in relevant_chunks
+                    ]
+                    sources_payload = json.dumps(
+                        {"sources": source_items, "footer": sources_footer}
+                    )
+                    yield f"event: sources\ndata: {sources_payload}\n\n"
+                else:
+                    yield sources_footer
+            if use_sse:
+                yield "event: done\ndata: [DONE]\n\n"
+
+        media_type = "text/event-stream" if use_sse else "text/plain"
+        headers = (
+            {
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            }
+            if use_sse
+            else None
+        )
+        return StreamingResponse(
+            stream_prevalidated_success(),
+            media_type=media_type,
+            headers=headers,
+        )
+
+    # Real-time streaming mode: stream tokens as they arrive
     def stream_content() -> Iterator[str]:
         collected: list[str] = []
         stream_failed = False
@@ -683,6 +786,22 @@ def ask_llm(
                 logger.warning(
                     "Suppressed sources footer: answer has ungrounded citations."
                 )
+                if use_sse:
+                    err_payload = json.dumps({
+                        "error": (
+                            "Grounding validation failed: response contains "
+                            "unverified citations or ungrounded claims."
+                        ),
+                        "validation_failed": True,
+                    })
+                    yield f"event: error\ndata: {err_payload}\n\n"
+                else:
+                    yield (
+                        "\n\n[VALIDATION_FAILED: Grounding validation failed. "
+                        "The response above contains unverified citations or "
+                        "ungrounded claims.]\n"
+                    )
+                return
 
         if use_sse:
             yield "event: done\ndata: [DONE]\n\n"

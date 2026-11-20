@@ -735,6 +735,7 @@ def test_citation_validation_and_hallucination_suppression(
     assert resp.status_code == 200
     assert "Fabricated statement [fake_doc.pdf, p. 99]." in resp.text
     assert "Sources:" not in resp.text
+    assert "[VALIDATION_FAILED:" in resp.text
 
 
 def test_rag_system_instructions_confidentiality_rule():
@@ -888,3 +889,75 @@ def test_ask_sse_relevance_short_circuit(
     assert "event: message" in resp.text
     assert "i don't know" in resp.text.lower()
     assert "event: done" in resp.text
+
+
+def test_ask_validate_before_stream_suppresses_hallucination(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+):
+    """Verify validate_before_stream=True completely suppresses ungrounded text."""
+
+    def mock_hallucinated_stream(*args, **kwargs):
+        yield "Fabricated statement [fake_doc.pdf, p. 99]."
+
+    monkeypatch.setattr(llm_module, "_stream_gemini", mock_hallucinated_stream)
+
+    resp = client.post(
+        "/ask",
+        json={
+            "question": "Tell me secrets",
+            "provider": "gemini",
+            "validate_before_stream": True,
+        },
+    )
+    assert resp.status_code == 200
+    assert "Fabricated statement" not in resp.text
+    assert "i don't know" in resp.text.lower()
+    assert "Sources:" not in resp.text
+
+
+def test_ask_validate_before_stream_passes_valid_answer(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+):
+    """Verify validate_before_stream=True streams verified response with sources."""
+
+    def mock_valid_stream(*args, **kwargs):
+        yield "Valid grounded excerpt [guide.pdf, p. 2]."
+
+    monkeypatch.setattr(llm_module, "_stream_gemini", mock_valid_stream)
+
+    resp = client.post(
+        "/ask",
+        json={
+            "question": "Tell me facts",
+            "provider": "gemini",
+            "validate_before_stream": True,
+        },
+    )
+    assert resp.status_code == 200
+    assert "Valid grounded excerpt [guide.pdf, p. 2]." in resp.text
+    assert "Sources:\n- guide.pdf (page 2)" in resp.text
+
+
+def test_ask_sse_validation_failure_emits_error_event(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+):
+    """Verify SSE streaming emits an error event when citation validation fails."""
+
+    def mock_hallucinated_stream(*args, **kwargs):
+        yield "Fabricated claim [fake.pdf, p. 99]."
+
+    monkeypatch.setattr(llm_module, "_stream_gemini", mock_hallucinated_stream)
+
+    resp = client.post(
+        "/ask",
+        json={
+            "question": "Tell me secrets",
+            "provider": "gemini",
+            "stream_format": "sse",
+        },
+    )
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("text/event-stream")
+    assert "event: error" in resp.text
+    assert "validation_failed" in resp.text
+    assert "event: sources" not in resp.text

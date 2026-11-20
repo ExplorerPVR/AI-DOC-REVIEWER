@@ -314,13 +314,21 @@ curl -N -X POST "http://127.0.0.1:8000/ask" \
   -d '{"question": "Hello from local LLM!", "provider": "ollama"}'
 ```
 
-#### Error Handling & Mid-Stream Failure Communication:
-- **Rate Limit Exceeded (`503 Service Unavailable`)**: Returned if the LLM provider rate limits (429) persist after 3 retries with exponential backoff before the stream starts.
-- **Gateway Timeout (`504 Gateway Timeout`)**: Returned if initial generation exceeds the timeout threshold across retries.
+#### Error Handling & Citation Grounding Guarantees:
+- **Strict Grounding Validation (`validate_before_stream: true`)**:
+  - When enabled via payload (`"validate_before_stream": true`) or header (`X-Validate-Before-Stream: true`), the response is buffered in memory and completely verified before any token reaches the client.
+  - If citation verification fails (e.g. fabricated citations like `[fake.pdf, p. 99]` or uncited claims), the hallucinated text is completely suppressed and replaced with `"I do not know based on the provided documents."` (zero token leakage).
+- **Real-Time Streaming Grounding Defense (`validate_before_stream: false`)**:
+  - If streaming in real time and inline citation validation fails at stream completion:
+    - **Raw text mode**: Suppresses `Sources:` footer and appends an explicit revocation banner:
+      `[VALIDATION_FAILED: Grounding validation failed. The response above contains unverified citations or ungrounded claims.]`
+    - **SSE mode**: Suppresses `event: sources` / `event: done` and emits `event: error` with `{"error": "...", "validation_failed": true}`.
+    - Prevents hallucinated or unverified responses from being mistaken for successful grounded answers.
 - **Mid-Stream Provider Interruption Handling**: If a provider connection drops or fails midway after HTTP 200 headers have begun streaming:
   - **SSE mode**: Emits a structured `event: error` with `{"error": "<sanitized_error>", "partial": true}` and suppresses `event: sources` / `event: done`.
   - **Raw text mode**: Appends `\n\n[ERROR: Streaming generation interrupted: <sanitized_error>]\n` and suppresses the `Sources:` footer.
-  - This ensures upstream clients or automated pipelines never mistake an aborted generation for a complete, successful answer.
+- **Rate Limit Exceeded (`503 Service Unavailable`)**: Returned if the LLM provider rate limits (429) persist after 3 retries with exponential backoff before the stream starts.
+- **Gateway Timeout (`504 Gateway Timeout`)**: Returned if initial generation exceeds the timeout threshold across retries.
 - **Unsupported Provider (`400 Bad Request`)**: Returned if a non-supported provider name is passed.
 
 ---
