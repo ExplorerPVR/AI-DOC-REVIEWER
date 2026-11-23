@@ -569,3 +569,20 @@ def generate(
             cost_usd=cost_usd,
             session=session,
         )
+
+        try:
+            from app.monitoring import trace_llm_generation
+
+            trace_llm_generation(
+                name="rag_generate",
+                provider=normalized_provider,
+                model=model,
+                prompt=logged_prompt if logged_prompt is not None else prompt,
+                completion=full_text,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                duration_seconds=duration,
+                cost_usd=cost_usd,
+            )
+        except Exception as mon_err:
+            logger.debug("Failed sending trace to Langfuse: %s", mon_err)

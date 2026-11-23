@@ -408,6 +408,24 @@ def extract_resume_data(
             session=session,
         )
 
+        try:
+            from app.monitoring import trace_llm_generation
+
+            trace_llm_generation(
+                name="extract_resume",
+                provider=normalized_provider,
+                model=model,
+                prompt=prompt,
+                completion=raw_json,
+                input_tokens=in_tokens,
+                output_tokens=out_tokens,
+                duration_seconds=duration,
+                cost_usd=cost_usd,
+                metadata={"attempt": attempt},
+            )
+        except Exception:
+            pass
+
         cleaned_json = clean_json_markdown(raw_json)
 
         # Attempt schema validation

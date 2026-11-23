@@ -31,6 +31,12 @@ from sqlmodel import Session, select
 
 from app.db import get_session
 from app.extractor import extract_resume_data
+from app.guardrails import (
+    contains_system_prompt_leak,
+    is_pii_harvesting_query,
+    is_prompt_injection,
+    redact_pii,
+)
 from app.ingestion import (
     ingest_document_pdf,
     sanitize_error_message,
@@ -557,6 +563,31 @@ def ask_llm(
         or raw_request.headers.get("x-validate-before-stream", "").lower() == "true"
     )
 
+    # 0. Security Guardrails: Prompt Injection & PII Harvesting Defense
+    is_inj, inj_reason = is_prompt_injection(question)
+    is_pii, pii_reason = is_pii_harvesting_query(question)
+    if is_inj or is_pii:
+        refusal_msg = f"I cannot answer this request. {inj_reason or pii_reason}"
+        if use_sse:
+            def sse_guardrail_refusal() -> Iterator[str]:
+                payload = json.dumps({"text": refusal_msg, "guardrail_blocked": True})
+                yield f"event: message\ndata: {payload}\n\n"
+                yield "event: done\ndata: [DONE]\n\n"
+
+            return StreamingResponse(
+                sse_guardrail_refusal(),
+                media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "Connection": "keep-alive",
+                    "X-Accel-Buffering": "no",
+                },
+            )
+        return StreamingResponse(
+            iter([refusal_msg]),
+            media_type="text/plain",
+        )
+
     # 1. Retrieve top-k relevant document chunks from pgvector
     try:
         retrieved_chunks = search_chunks(
@@ -691,14 +722,32 @@ def ask_llm(
                 stream_grounding_refusal(), media_type=media_type
             )
 
+        # Check system prompt leakage
+        if contains_system_prompt_leak(full_answer):
+            logger.warning("Suppressed output containing leaked system prompt rules.")
+            def stream_leak_refusal() -> Iterator[str]:
+                if use_sse:
+                    err_payload = json.dumps({
+                        "error": "Response suppressed: security violation.",
+                        "validation_failed": True,
+                    })
+                    yield f"event: error\ndata: {err_payload}\n\n"
+                else:
+                    yield NO_ANSWER_MESSAGE
+
+            media_type = "text/event-stream" if use_sse else "text/plain"
+            return StreamingResponse(stream_leak_refusal(), media_type=media_type)
+
         # Valid answer: stream verified chunks + sources footer
         sources_footer = format_sources_footer(relevant_chunks)
         def stream_prevalidated_success() -> Iterator[str]:
             for chunk in buffered_chunks:
+                safe_chunk = redact_pii(chunk)
                 if use_sse:
-                    yield f"event: message\ndata: {json.dumps({'text': chunk})}\n\n"
+                    payload = json.dumps({"text": safe_chunk})
+                    yield f"event: message\ndata: {payload}\n\n"
                 else:
-                    yield chunk
+                    yield safe_chunk
             if sources_footer:
                 if use_sse:
                     source_items = [
@@ -735,19 +784,22 @@ def ask_llm(
         collected: list[str] = []
         stream_failed = False
         if first_chunk:
+            safe_first = redact_pii(first_chunk)
             collected.append(first_chunk)
             if use_sse:
-                yield f"event: message\ndata: {json.dumps({'text': first_chunk})}\n\n"
+                yield f"event: message\ndata: {json.dumps({'text': safe_first})}\n\n"
             else:
-                yield first_chunk
+                yield safe_first
         try:
             for chunk in gen:
                 if chunk:
+                    safe_chunk = redact_pii(chunk)
                     collected.append(chunk)
                     if use_sse:
-                        yield f"event: message\ndata: {json.dumps({'text': chunk})}\n\n"
+                        payload = json.dumps({"text": safe_chunk})
+                        yield f"event: message\ndata: {payload}\n\n"
                     else:
-                        yield chunk
+                        yield safe_chunk
         except Exception as err:
             logger.error("Error during streaming generation: %s", err)
             stream_failed = True
@@ -766,6 +818,23 @@ def ask_llm(
 
         full_answer = "".join(collected)
         if full_answer.strip() and not is_refusal_answer(full_answer):
+            if contains_system_prompt_leak(full_answer):
+                logger.warning(
+                    "Suppressed output containing leaked system prompt rules."
+                )
+                if use_sse:
+                    err_payload = json.dumps({
+                        "error": "Response suppressed: security violation.",
+                        "validation_failed": True,
+                    })
+                    yield f"event: error\ndata: {err_payload}\n\n"
+                else:
+                    yield (
+                        "\n\n[VALIDATION_FAILED: "
+                        "Response leaked system instructions.]\n"
+                    )
+                return
+
             if validate_inline_citations(
                 full_answer, relevant_chunks, require_citation=True
             ):
