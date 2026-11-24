@@ -58,10 +58,14 @@ from app.models import (
     DocumentStatus,
     ErrorResponse,
     ExtractRequest,
+    Feedback,
+    FeedbackRequest,
+    FeedbackResponse,
     HealthResponse,
     ResumeData,
     SearchResult,
 )
+from app.monitoring import generate_trace_id, record_feedback
 from app.pricing import DEFAULT_MODELS
 from app.rag import (
     NO_ANSWER_MESSAGE,
@@ -563,6 +567,15 @@ def ask_llm(
         or raw_request.headers.get("x-validate-before-stream", "").lower() == "true"
     )
 
+    trace_id = generate_trace_id()
+    base_headers = {"X-Trace-Id": trace_id}
+    sse_headers = {
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+        "X-Accel-Buffering": "no",
+        "X-Trace-Id": trace_id,
+    }
+
     # 0. Security Guardrails: Prompt Injection & PII Harvesting Defense
     is_inj, inj_reason = is_prompt_injection(question)
     is_pii, pii_reason = is_pii_harvesting_query(question)
@@ -577,15 +590,12 @@ def ask_llm(
             return StreamingResponse(
                 sse_guardrail_refusal(),
                 media_type="text/event-stream",
-                headers={
-                    "Cache-Control": "no-cache",
-                    "Connection": "keep-alive",
-                    "X-Accel-Buffering": "no",
-                },
+                headers=sse_headers,
             )
         return StreamingResponse(
             iter([refusal_msg]),
             media_type="text/plain",
+            headers=base_headers,
         )
 
     # 1. Retrieve top-k relevant document chunks from pgvector
@@ -614,15 +624,12 @@ def ask_llm(
             return StreamingResponse(
                 sse_no_answer(),
                 media_type="text/event-stream",
-                headers={
-                    "Cache-Control": "no-cache",
-                    "Connection": "keep-alive",
-                    "X-Accel-Buffering": "no",
-                },
+                headers=sse_headers,
             )
         return StreamingResponse(
             iter([NO_ANSWER_MESSAGE]),
             media_type="text/plain",
+            headers=base_headers,
         )
 
     # 3. Build strict grounded prompt with file & page metadata
@@ -639,6 +646,7 @@ def ask_llm(
             session=session,
             logged_prompt=question,
             system_instruction=RAG_SYSTEM_INSTRUCTIONS,
+            trace_id=trace_id,
         )
         # Trigger connection & retry loop before sending 200 header
         first_chunk = next(gen, None)
@@ -683,6 +691,7 @@ def ask_llm(
         full_answer = "".join(buffered_chunks)
 
         # Refusal answers bypass citation check and return refusal text
+        response_headers = sse_headers if use_sse else base_headers
         if not full_answer.strip() or is_refusal_answer(full_answer):
             def stream_prevalidated_refusal() -> Iterator[str]:
                 out = full_answer if full_answer.strip() else NO_ANSWER_MESSAGE
@@ -694,7 +703,9 @@ def ask_llm(
 
             media_type = "text/event-stream" if use_sse else "text/plain"
             return StreamingResponse(
-                stream_prevalidated_refusal(), media_type=media_type
+                stream_prevalidated_refusal(),
+                media_type=media_type,
+                headers=response_headers,
             )
 
         # Check inline citations against retrieved document chunks
@@ -719,7 +730,9 @@ def ask_llm(
 
             media_type = "text/event-stream" if use_sse else "text/plain"
             return StreamingResponse(
-                stream_grounding_refusal(), media_type=media_type
+                stream_grounding_refusal(),
+                media_type=media_type,
+                headers=response_headers,
             )
 
         # Check system prompt leakage
@@ -736,7 +749,11 @@ def ask_llm(
                     yield NO_ANSWER_MESSAGE
 
             media_type = "text/event-stream" if use_sse else "text/plain"
-            return StreamingResponse(stream_leak_refusal(), media_type=media_type)
+            return StreamingResponse(
+                stream_leak_refusal(),
+                media_type=media_type,
+                headers=response_headers,
+            )
 
         # Valid answer: stream verified chunks + sources footer
         sources_footer = format_sources_footer(relevant_chunks)
@@ -764,22 +781,14 @@ def ask_llm(
                 yield "event: done\ndata: [DONE]\n\n"
 
         media_type = "text/event-stream" if use_sse else "text/plain"
-        headers = (
-            {
-                "Cache-Control": "no-cache",
-                "Connection": "keep-alive",
-                "X-Accel-Buffering": "no",
-            }
-            if use_sse
-            else None
-        )
         return StreamingResponse(
             stream_prevalidated_success(),
             media_type=media_type,
-            headers=headers,
+            headers=response_headers,
         )
 
     # Real-time streaming mode: stream tokens as they arrive
+    response_headers = sse_headers if use_sse else base_headers
     def stream_content() -> Iterator[str]:
         collected: list[str] = []
         stream_failed = False
@@ -876,16 +885,9 @@ def ask_llm(
             yield "event: done\ndata: [DONE]\n\n"
 
     media_type = "text/event-stream" if use_sse else "text/plain"
-    headers = (
-        {
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        }
-        if use_sse
-        else None
+    return StreamingResponse(
+        stream_content(), media_type=media_type, headers=response_headers
     )
-    return StreamingResponse(stream_content(), media_type=media_type, headers=headers)
 
 
 @app.post(
@@ -940,4 +942,80 @@ def extract_resume(
         resume_text=content,
         provider=provider,
         session=session,
+    )
+
+
+@app.post(
+    "/feedback",
+    response_model=FeedbackResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Submit User Feedback",
+    description=(
+        "Submit thumbs up/down user feedback and optional comment for an assistant "
+        "response. Associates feedback with the Langfuse trace and records score "
+        "to the database and Langfuse monitoring."
+    ),
+    responses={
+        200: {
+            "model": FeedbackResponse,
+            "description": "User feedback recorded successfully",
+        },
+        400: {
+            "model": ErrorResponse,
+            "description": "Invalid feedback rating or missing score/rating",
+        },
+        500: {
+            "model": ErrorResponse,
+            "description": "Failed to persist user feedback in database",
+        },
+    },
+    tags=["Feedback"],
+)
+def submit_feedback(
+    request: FeedbackRequest,
+    session: Annotated[Session, Depends(get_session)],
+) -> FeedbackResponse:
+    """Record user feedback and export score metric to Langfuse."""
+    try:
+        resolved_score = request.resolved_score()
+    except ValueError as val_err:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(val_err),
+        ) from val_err
+
+    feedback_entry = Feedback(
+        trace_id=request.trace_id,
+        score=resolved_score,
+        comment=request.comment,
+    )
+    try:
+        session.add(feedback_entry)
+        session.commit()
+        session.refresh(feedback_entry)
+    except Exception as exc:
+        logger.error("Failed to save feedback record to database: %s", exc)
+        session.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to save user feedback in database.",
+        ) from exc
+
+    recorded_to_langfuse = False
+    try:
+        recorded_to_langfuse = record_feedback(
+            trace_id=request.trace_id,
+            score=resolved_score,
+            comment=request.comment,
+        )
+    except Exception as exc:
+        logger.warning("Error forwarding feedback to Langfuse: %s", exc)
+
+    return FeedbackResponse(
+        id=feedback_entry.id,
+        trace_id=feedback_entry.trace_id,
+        score=feedback_entry.score,
+        comment=feedback_entry.comment,
+        recorded_to_langfuse=recorded_to_langfuse,
+        created_at=feedback_entry.created_at,
     )

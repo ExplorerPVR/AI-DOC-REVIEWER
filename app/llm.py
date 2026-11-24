@@ -489,6 +489,7 @@ def generate(
     timeout: float = DEFAULT_TIMEOUT_SECONDS,
     logged_prompt: str | None = None,
     system_instruction: str | None = None,
+    trace_id: str | None = None,
 ) -> Iterator[str]:
     """Generate streaming text response from the configured LLM provider.
 
@@ -506,6 +507,8 @@ def generate(
         Alternate prompt string to store in the LLMCall audit record.
     system_instruction : str, optional
         High-authority system instructions dispatched via native provider system roles.
+    trace_id : str, optional
+        Langfuse trace identifier to link LLM generation to request tracing.
 
     Yields
     ------
@@ -583,6 +586,7 @@ def generate(
                 output_tokens=output_tokens,
                 duration_seconds=duration,
                 cost_usd=cost_usd,
+                trace_id=trace_id,
             )
         except Exception as mon_err:
             logger.debug("Failed sending trace to Langfuse: %s", mon_err)
