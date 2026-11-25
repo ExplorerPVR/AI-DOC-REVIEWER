@@ -6,6 +6,7 @@ and unauthorized extraction of Personally Identifiable Information (PII).
 
 import logging
 import re
+from collections.abc import Iterator
 
 logger = logging.getLogger("app.guardrails")
 
@@ -169,6 +170,71 @@ def redact_pii(text: str) -> str:
     redacted = _SSN_PATTERN.sub("[REDACTED_SSN]", redacted)
     redacted = _CARD_PATTERN.sub("[REDACTED_CARD]", redacted)
     return redacted
+
+
+class StreamingPIIRedactor:
+    """Stateful streaming redactor that masks PII across chunk boundaries.
+
+    Maintains an un-emitted tail buffer across consecutive chunks so that
+    PII items split across token boundaries (e.g. 'john.doe@' and 'gmail.com')
+    are safely reassembled and redacted before reaching the client.
+    """
+
+    def __init__(self, max_holdback: int = 60) -> None:
+        self.buffer = ""
+        self.max_holdback = max_holdback
+
+    def feed(self, chunk: str) -> str:
+        """Feed a new chunk and return the safe, redacted portion ready to emit."""
+        if not chunk:
+            return ""
+        current = self.buffer + chunk
+
+        # 1. Trailing potential email: non-whitespace word or email-like sequence
+        match_email = re.search(r"[A-Za-z0-9._%+-]*@?[A-Za-z0-9.-]*$", current)
+        idx_email = (
+            match_email.start()
+            if match_email and match_email.group()
+            else len(current)
+        )
+
+        # 2. Trailing phone/ssn/card candidate (digits and phone separators)
+        match_phone = re.search(
+            r"(?:\+?\d|\(\d|\b\d)[\d\s\-().]{0,30}$", current
+        )
+        idx_phone = (
+            match_phone.start()
+            if match_phone and match_phone.group()
+            else len(current)
+        )
+
+        cutoff = min(idx_email, idx_phone)
+        if len(current) - cutoff > self.max_holdback:
+            cutoff = len(current) - self.max_holdback
+
+        safe_part = current[:cutoff]
+        self.buffer = current[cutoff:]
+
+        return redact_pii(safe_part) if safe_part else ""
+
+    def flush(self) -> str:
+        """Flush and redact any remaining buffered tail at stream completion."""
+        tail = self.buffer
+        self.buffer = ""
+        return redact_pii(tail) if tail else ""
+
+
+def stream_redact_pii(chunks: Iterator[str]) -> Iterator[str]:
+    """Stream text chunks while redacting PII across chunk boundaries."""
+    redactor = StreamingPIIRedactor()
+    for chunk in chunks:
+        if chunk:
+            out = redactor.feed(chunk)
+            if out:
+                yield out
+    flushed = redactor.flush()
+    if flushed:
+        yield flushed
 
 
 # -------------------------------------------------------------------------

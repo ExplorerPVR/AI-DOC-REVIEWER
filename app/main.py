@@ -32,10 +32,11 @@ from sqlmodel import Session, select
 from app.db import get_session
 from app.extractor import extract_resume_data
 from app.guardrails import (
+    StreamingPIIRedactor,
     contains_system_prompt_leak,
     is_pii_harvesting_query,
     is_prompt_injection,
-    redact_pii,
+    stream_redact_pii,
 )
 from app.ingestion import (
     ingest_document_pdf,
@@ -758,8 +759,7 @@ def ask_llm(
         # Valid answer: stream verified chunks + sources footer
         sources_footer = format_sources_footer(relevant_chunks)
         def stream_prevalidated_success() -> Iterator[str]:
-            for chunk in buffered_chunks:
-                safe_chunk = redact_pii(chunk)
+            for safe_chunk in stream_redact_pii(iter(buffered_chunks)):
                 if use_sse:
                     payload = json.dumps({"text": safe_chunk})
                     yield f"event: message\ndata: {payload}\n\n"
@@ -792,26 +792,34 @@ def ask_llm(
     def stream_content() -> Iterator[str]:
         collected: list[str] = []
         stream_failed = False
-        if first_chunk:
-            safe_first = redact_pii(first_chunk)
-            collected.append(first_chunk)
+        redactor = StreamingPIIRedactor()
+
+        def emit_safe(safe_text: str) -> Iterator[str]:
+            if not safe_text:
+                return
             if use_sse:
-                yield f"event: message\ndata: {json.dumps({'text': safe_first})}\n\n"
+                yield f"event: message\ndata: {json.dumps({'text': safe_text})}\n\n"
             else:
-                yield safe_first
+                yield safe_text
+
+        if first_chunk:
+            collected.append(first_chunk)
+            safe_first = redactor.feed(first_chunk)
+            if safe_first:
+                yield from emit_safe(safe_first)
         try:
             for chunk in gen:
                 if chunk:
-                    safe_chunk = redact_pii(chunk)
                     collected.append(chunk)
-                    if use_sse:
-                        payload = json.dumps({"text": safe_chunk})
-                        yield f"event: message\ndata: {payload}\n\n"
-                    else:
-                        yield safe_chunk
+                    safe_chunk = redactor.feed(chunk)
+                    if safe_chunk:
+                        yield from emit_safe(safe_chunk)
         except Exception as err:
             logger.error("Error during streaming generation: %s", err)
             stream_failed = True
+            flushed_tail = redactor.flush()
+            if flushed_tail:
+                yield from emit_safe(flushed_tail)
             safe_err = sanitize_error_message(err)
             if use_sse:
                 yield (
@@ -824,6 +832,10 @@ def ask_llm(
 
         if stream_failed:
             return
+
+        flushed_tail = redactor.flush()
+        if flushed_tail:
+            yield from emit_safe(flushed_tail)
 
         full_answer = "".join(collected)
         if full_answer.strip() and not is_refusal_answer(full_answer):

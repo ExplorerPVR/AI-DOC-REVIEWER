@@ -836,7 +836,8 @@ def test_ask_mid_stream_exception_communicates_sse_error(
     assert resp.status_code == 200
     assert resp.headers["content-type"].startswith("text/event-stream")
     assert "event: message" in resp.text
-    assert "Partial SSE response chunk." in resp.text
+    assert "Partial SSE response" in resp.text
+    assert "chunk." in resp.text
     assert "event: error" in resp.text
     assert '"partial": true' in resp.text
     assert "Groq token limit reached mid-stream" in resp.text
@@ -961,3 +962,23 @@ def test_ask_sse_validation_failure_emits_error_event(
     assert "event: error" in resp.text
     assert "validation_failed" in resp.text
     assert "event: sources" not in resp.text
+
+
+def test_ask_streaming_redacts_pii_split_across_chunks(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+):
+    """Verify /ask masks PII when email or phone is split across streaming chunks."""
+
+    def mock_split_stream(*args, **kwargs):
+        yield "Reach author at contact.person@"
+        yield "example.com for info [guide.pdf, p. 2]."
+
+    monkeypatch.setattr(llm_module, "_stream_gemini", mock_split_stream)
+
+    resp = client.post(
+        "/ask",
+        json={"question": "What is the contact?", "provider": "gemini"},
+    )
+    assert resp.status_code == 200
+    assert "contact.person@example.com" not in resp.text
+    assert "[REDACTED_EMAIL]" in resp.text

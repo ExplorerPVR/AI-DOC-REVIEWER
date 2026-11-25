@@ -9,10 +9,12 @@ import app.llm as llm_module
 import app.main as main_module
 from app.db import get_session
 from app.guardrails import (
+    StreamingPIIRedactor,
     contains_system_prompt_leak,
     is_pii_harvesting_query,
     is_prompt_injection,
     redact_pii,
+    stream_redact_pii,
 )
 from app.main import app
 from app.models import SearchResult
@@ -155,6 +157,49 @@ def test_redact_pii_masks_international_and_indian_phone_formats():
     # Ensure technical figures, dates, and citations are preserved
     safe_text = "Date 2026-11-25, 24GB VRAM, score 0.88 [paper.pdf, p. 1]."
     assert redact_pii(safe_text) == safe_text
+
+
+def test_streaming_pii_redactor_masks_split_email_chunks():
+    """Verify PII split across consecutive stream chunks is masked."""
+    chunks = ["Contact Alice at john.doe@", "gmail.com for help."]
+    redactor = StreamingPIIRedactor()
+    out1 = redactor.feed(chunks[0])
+    out2 = redactor.feed(chunks[1])
+    out3 = redactor.flush()
+
+    assert "john.doe@" not in out1
+    full = out1 + out2 + out3
+    assert "john.doe@gmail.com" not in full
+    assert "[REDACTED_EMAIL]" in full
+
+
+def test_streaming_pii_redactor_masks_split_phone_and_ssn_chunks():
+    """Verify phone numbers and SSNs split across chunks are masked."""
+    phone_chunks = ["Reach +91 987", "65 43210 please."]
+    redacted_phone = "".join(stream_redact_pii(iter(phone_chunks)))
+    assert "+91 98765 43210" not in redacted_phone
+    assert "[REDACTED_PHONE]" in redacted_phone
+
+    ssn_chunks = ["SSN is 123-", "45-6789 on file."]
+    redacted_ssn = "".join(stream_redact_pii(iter(ssn_chunks)))
+    assert "123-45-6789" not in redacted_ssn
+    assert "[REDACTED_SSN]" in redacted_ssn
+
+    card_chunks = ["Card: 4532-1234-", "5678-9012 expires."]
+    redacted_card = "".join(stream_redact_pii(iter(card_chunks)))
+    assert "4532-1234-5678-9012" not in redacted_card
+    assert "[REDACTED_CARD]" in redacted_card
+
+
+def test_streaming_pii_redactor_preserves_clean_text():
+    """Verify normal text streaming without PII is not altered."""
+    clean_chunks = [
+        "Self-supervised ",
+        "learning representations ",
+        "scale effectively.",
+    ]
+    result = "".join(stream_redact_pii(iter(clean_chunks)))
+    assert result == "".join(clean_chunks)
 
 
 def test_contains_system_prompt_leak_detection():
