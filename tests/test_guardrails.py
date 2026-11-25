@@ -133,6 +133,30 @@ def test_redact_pii_masks_sensitive_identifiers():
     assert "[REDACTED_CARD]" in redacted
 
 
+def test_redact_pii_masks_international_and_indian_phone_formats():
+    """Verify 10-digit Indian numbers, +91, and international phones are masked."""
+    cases = [
+        ("Mobile is 9876543210.", "9876543210"),
+        ("Call +91 9876543210 for help.", "+91 9876543210"),
+        ("Reach at +91-9876543210.", "+91-9876543210"),
+        ("Phone: +91 98765 43210.", "+91 98765 43210"),
+        ("Contact 98765 43210 today.", "98765 43210"),
+        ("WhatsApp +91-98765-43210.", "+91-98765-43210"),
+        ("Trunk mobile 09876543210.", "09876543210"),
+        ("UK office: +44 7911 123456.", "+44 7911 123456"),
+        ("French line: +33 1 42 68 00 00.", "+33 1 42 68 00 00"),
+        ("Brazil cell: +55 11 98765-4321.", "+55 11 98765-4321"),
+    ]
+    for text, raw_phone in cases:
+        redacted = redact_pii(text)
+        assert raw_phone not in redacted, f"Failed to redact phone: {raw_phone}"
+        assert "[REDACTED_PHONE]" in redacted
+
+    # Ensure technical figures, dates, and citations are preserved
+    safe_text = "Date 2026-11-25, 24GB VRAM, score 0.88 [paper.pdf, p. 1]."
+    assert redact_pii(safe_text) == safe_text
+
+
 def test_contains_system_prompt_leak_detection():
     """Verify generated text with system instruction snippets is detected."""
     safe_text = "The GPU has 24GB of VRAM [specs.pdf, p. 1]."
