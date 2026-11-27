@@ -982,3 +982,48 @@ def test_ask_streaming_redacts_pii_split_across_chunks(
     assert resp.status_code == 200
     assert "contact.person@example.com" not in resp.text
     assert "[REDACTED_EMAIL]" in resp.text
+
+
+def test_ask_prevalidated_refusal_redacts_pii(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+):
+    """Verify prevalidated refusal responses redact quoted emails and phone numbers."""
+
+    def mock_refusal_stream(*args, **kwargs):
+        yield "I do not know the details for alice.smith@example.org "
+        yield "or telephone +91 98765 43210."
+
+    monkeypatch.setattr(llm_module, "_stream_gemini", mock_refusal_stream)
+
+    # 1. Plain text mode
+    resp = client.post(
+        "/ask",
+        json={
+            "question": "What is the contact?",
+            "provider": "gemini",
+            "validate_before_stream": True,
+        },
+    )
+    assert resp.status_code == 200
+    assert "alice.smith@example.org" not in resp.text
+    assert "+91 98765 43210" not in resp.text
+    assert "[REDACTED_EMAIL]" in resp.text
+    assert "[REDACTED_PHONE]" in resp.text
+    assert "i do not know" in resp.text.lower()
+
+    # 2. SSE streaming mode
+    resp_sse = client.post(
+        "/ask",
+        json={
+            "question": "What is the contact?",
+            "provider": "gemini",
+            "validate_before_stream": True,
+            "stream_format": "sse",
+        },
+    )
+    assert resp_sse.status_code == 200
+    assert "alice.smith@example.org" not in resp_sse.text
+    assert "+91 98765 43210" not in resp_sse.text
+    assert "[REDACTED_EMAIL]" in resp_sse.text
+    assert "[REDACTED_PHONE]" in resp_sse.text
+    assert "event: done" in resp_sse.text

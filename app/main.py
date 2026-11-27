@@ -36,6 +36,7 @@ from app.guardrails import (
     contains_system_prompt_leak,
     is_pii_harvesting_query,
     is_prompt_injection,
+    redact_pii,
     stream_redact_pii,
 )
 from app.ingestion import (
@@ -695,7 +696,11 @@ def ask_llm(
         response_headers = sse_headers if use_sse else base_headers
         if not full_answer.strip() or is_refusal_answer(full_answer):
             def stream_prevalidated_refusal() -> Iterator[str]:
-                out = full_answer if full_answer.strip() else NO_ANSWER_MESSAGE
+                out = (
+                    redact_pii(full_answer)
+                    if full_answer.strip()
+                    else NO_ANSWER_MESSAGE
+                )
                 if use_sse:
                     yield f"event: message\ndata: {json.dumps({'text': out})}\n\n"
                     yield "event: done\ndata: [DONE]\n\n"
