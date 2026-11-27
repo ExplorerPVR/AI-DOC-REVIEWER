@@ -357,3 +357,118 @@ class ExtractRequest(BaseModel):
         description="Target LLM provider ('gemini', 'groq', 'ollama')",
         examples=["gemini"],
     )
+
+
+class FeedbackBase(SQLModel):
+    """Base schema holding common user feedback fields."""
+
+    trace_id: str = SQLModelField(
+        index=True,
+        description="Langfuse trace identifier or session trace ID",
+    )
+    score: float = SQLModelField(
+        description="Numeric score (1.0 for positive/up, 0.0 for negative/down)",
+        ge=0.0,
+        le=1.0,
+    )
+    comment: str | None = SQLModelField(
+        default=None,
+        description="Optional free-form user feedback comment",
+    )
+
+
+class Feedback(FeedbackBase, table=True):
+    """SQLModel database table model for persisting user feedback."""
+
+    __tablename__ = "feedbacks"
+
+    id: UUID = SQLModelField(
+        default_factory=uuid4,
+        primary_key=True,
+        index=True,
+        description="Unique UUID primary key for the feedback entry",
+    )
+    created_at: datetime = SQLModelField(
+        default_factory=lambda: datetime.now(timezone.utc),
+        description="Timestamp in UTC recording when the feedback was submitted",
+    )
+
+
+class FeedbackRequest(BaseModel):
+    """Request payload schema for the POST /feedback endpoint."""
+
+    trace_id: str = PydanticField(
+        ...,
+        min_length=1,
+        max_length=128,
+        description="Langfuse trace identifier associated with the assistant response",
+        examples=["018e38d7-68b2-789a-8a4e-d007c0efb0ef"],
+    )
+    rating: Literal["up", "down"] | None = PydanticField(
+        default=None,
+        description="Thumbs up or thumbs down rating ('up' or 'down')",
+        examples=["up"],
+    )
+    score: float | None = PydanticField(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description="Numeric score (1.0 = positive/up, 0.0 = negative/down)",
+        examples=[1.0],
+    )
+    comment: str | None = PydanticField(
+        default=None,
+        max_length=2000,
+        description="Optional feedback comment or explanation",
+        examples=["Accurate answer with verified citations."],
+    )
+
+    @field_validator("rating", mode="before")
+    @classmethod
+    def normalize_rating(cls, value: Any) -> str | None:
+        """Normalize casing and aliases for rating values."""
+        if value is None:
+            return None
+        cleaned = str(value).strip().lower()
+        if cleaned in {"up", "thumbs_up", "+1", "positive", "like"}:
+            return "up"
+        if cleaned in {"down", "thumbs_down", "-1", "negative", "dislike"}:
+            return "down"
+        return cleaned
+
+    def resolved_score(self) -> float:
+        """Resolve numeric score from rating ('up'=1.0, 'down'=0.0) or score."""
+        if self.score is not None:
+            return float(self.score)
+        if self.rating == "up":
+            return 1.0
+        if self.rating == "down":
+            return 0.0
+        raise ValueError(
+            "Either 'rating' ('up'/'down') or 'score' (0.0-1.0) must be provided."
+        )
+
+
+class FeedbackResponse(BaseModel):
+    """Response schema returned upon successfully recording feedback."""
+
+    id: UUID = PydanticField(
+        description="Unique UUID identifier for the persisted feedback entry",
+    )
+    trace_id: str = PydanticField(
+        description="Langfuse trace identifier",
+    )
+    score: float = PydanticField(
+        description="Recorded feedback score (1.0 or 0.0)",
+    )
+    comment: str | None = PydanticField(
+        default=None,
+        description="Optional recorded user feedback comment",
+    )
+    recorded_to_langfuse: bool = PydanticField(
+        default=False,
+        description="Whether the score was exported to Langfuse monitoring",
+    )
+    created_at: datetime = PydanticField(
+        description="Timestamp in UTC recording when the feedback was submitted",
+    )

@@ -324,6 +324,8 @@ def test_upload_file_write_failure_leaves_no_db_record(
 ):
     """Verify failed file write returns 500 and creates no DB record."""
 
+    orig_write = Path.write_bytes
+
     def fail_write(*args, **kwargs):
         raise OSError("Disk full error simulation")
 
@@ -340,8 +342,8 @@ def test_upload_file_write_failure_leaves_no_db_record(
     ).first()
     assert existing is None
 
-    # Undo failure simulation and verify re-upload with same name succeeds without 409
-    monkeypatch.undo()
+    # Restore write_bytes without undoing the fixture's background ingestion mock
+    monkeypatch.setattr("pathlib.Path.write_bytes", orig_write)
     res_retry = client.post("/documents", files=files)
     assert res_retry.status_code == 201
 
